@@ -13,3 +13,4 @@ global using System.Net.Sockets;
 global using System.Net.WebSockets;
 global using System.Threading;
 global using System.Threading.Tasks;
+global using System.Security.Cryptography;

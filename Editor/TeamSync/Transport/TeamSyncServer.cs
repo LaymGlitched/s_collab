@@ -6,8 +6,9 @@ using NetWebSocketMessageType = System.Net.WebSockets.WebSocketMessageType;
 using NetWebSocketCloseStatus = System.Net.WebSockets.WebSocketCloseStatus;
 
 /// <summary>
-/// Embedded WebSocket server hosted in the Editor process.
-/// Handles incoming peer connections, routes envelopes, and broadcasts updates.
+/// Embedded WebSocket server hosted in the Editor process using pure TcpListener.
+/// Binds to IPAddress.Any (0.0.0.0) without requiring Administrator privileges
+/// or Windows HttpListener URL ACL registration.
 /// </summary>
 public sealed class TeamSyncServer : ITeamSyncTransport
 {
@@ -23,7 +24,7 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 	public int Port { get; }
 	public string StatusText { get; private set; } = "Stopped";
 
-	private HttpListener _httpListener;
+	private TcpListener _tcpListener;
 	private CancellationTokenSource _cts;
 	private readonly ConcurrentDictionary<string, NetWebSocket> _clients = new();
 
@@ -38,98 +39,75 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 		if ( IsRunning ) return;
 
 		_cts = new CancellationTokenSource();
-		_httpListener = new HttpListener();
 
-		bool bound = false;
 		try
 		{
-			// Try binding to all interfaces first
-			_httpListener.Prefixes.Add( $"http://*:{Port}/teamsync/" );
-			_httpListener.Start();
-			bound = true;
+			// Bind to all network interfaces (LAN, WAN, localhost, virtual adapters)
+			_tcpListener = new TcpListener( IPAddress.Any, Port );
+			_tcpListener.Server.SetSocketOption( SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true );
+			_tcpListener.Start();
+
+			IsRunning = true;
+			StatusText = $"Hosting on port {Port} (All Interfaces)";
+			OnStatusChanged?.Invoke( StatusText );
+			Log.Info( $"[TeamSync] Server started listening on 0.0.0.0:{Port}." );
+
+			_ = Task.Run( () => ListenLoopAsync( _cts.Token ) );
 		}
-		catch ( Exception )
+		catch ( Exception ex )
 		{
-			// Fallback to localhost/127.0.0.1 if wildcard requires admin permissions
-			_httpListener.Close();
-			_httpListener = new HttpListener();
-			_httpListener.Prefixes.Add( $"http://localhost:{Port}/teamsync/" );
-			_httpListener.Prefixes.Add( $"http://127.0.0.1:{Port}/teamsync/" );
-			try
-			{
-				_httpListener.Start();
-				bound = true;
-			}
-			catch ( Exception ex )
-			{
-				StatusText = $"Failed to bind port {Port}: {ex.Message}";
-				OnStatusChanged?.Invoke( StatusText );
-				OnError?.Invoke( StatusText );
-				return;
-			}
+			StatusText = $"Failed to bind port {Port}: {ex.Message}";
+			OnStatusChanged?.Invoke( StatusText );
+			OnError?.Invoke( StatusText );
+			Log.Error( $"[TeamSync] Server bind error: {ex.Message}" );
 		}
-
-		if ( !bound ) return;
-
-		IsRunning = true;
-		StatusText = $"Hosting on port {Port}";
-		OnStatusChanged?.Invoke( StatusText );
-
-		_ = Task.Run( () => ListenLoopAsync( _cts.Token ) );
 	}
 
 	public async Task StopAsync()
 	{
-		if ( !IsRunning ) return;
+		if ( !IsRunning && _tcpListener == null ) return;
 		IsRunning = false;
 		StatusText = "Stopped";
 		OnStatusChanged?.Invoke( StatusText );
 
 		_cts?.Cancel();
 
-		try
+		foreach ( var kvp in _clients )
 		{
-			foreach ( var kvp in _clients )
+			try
 			{
-				try
+				if ( kvp.Value.State == NetWebSocketState.Open )
 				{
-					if ( kvp.Value.State == NetWebSocketState.Open )
-					{
-						await kvp.Value.CloseAsync( NetWebSocketCloseStatus.NormalClosure, "Host closed session", CancellationToken.None );
-					}
+					await kvp.Value.CloseAsync( NetWebSocketCloseStatus.NormalClosure, "Host closed session", CancellationToken.None );
 				}
-				catch { }
 			}
-			_clients.Clear();
+			catch { }
+			try
+			{
+				kvp.Value.Dispose();
+			}
+			catch { }
 		}
-		catch { }
+		_clients.Clear();
 
 		try
 		{
-			_httpListener?.Stop();
-			_httpListener?.Close();
+			_tcpListener?.Stop();
 		}
 		catch { }
+		_tcpListener = null;
 	}
 
 	private async Task ListenLoopAsync( CancellationToken ct )
 	{
-		while ( !ct.IsCancellationRequested && _httpListener != null && _httpListener.IsListening )
+		while ( !ct.IsCancellationRequested && _tcpListener != null )
 		{
 			try
 			{
-				var context = await _httpListener.GetContextAsync();
-				if ( context.Request.IsWebSocketRequest )
-				{
-					_ = Task.Run( () => HandleClientWebSocketAsync( context, ct ) );
-				}
-				else
-				{
-					context.Response.StatusCode = 400;
-					context.Response.Close();
-				}
+				var tcpClient = await _tcpListener.AcceptTcpClientAsync( ct );
+				_ = Task.Run( () => HandleClientConnectionAsync( tcpClient, ct ) );
 			}
-			catch ( HttpListenerException ) when ( ct.IsCancellationRequested )
+			catch ( OperationCanceledException )
 			{
 				break;
 			}
@@ -143,27 +121,53 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 		}
 	}
 
-	private async Task HandleClientWebSocketAsync( HttpListenerContext context, CancellationToken ct )
+	private async Task HandleClientConnectionAsync( TcpClient tcpClient, CancellationToken ct )
 	{
-		NetWebSocket ws = null;
 		string clientPeerId = null;
+		NetWebSocket ws = null;
 
 		try
 		{
-			var wsContext = await context.AcceptWebSocketAsync( subProtocol: null );
-			ws = wsContext.WebSocket;
+			tcpClient.NoDelay = true;
+			var stream = tcpClient.GetStream();
 
-			// Generate a temporary peer ID until Hello message
+			// 1. Perform RFC 6455 HTTP WebSocket Upgrade Handshake
+			string secKey = await ReadWebSocketHandshakeKeyAsync( stream, ct );
+			if ( string.IsNullOrEmpty( secKey ) )
+			{
+				tcpClient.Close();
+				return;
+			}
+
+			string acceptKey = Convert.ToBase64String(
+				SHA1.HashData( Encoding.UTF8.GetBytes( secKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ) )
+			);
+
+			string responseHeader = "HTTP/1.1 101 Switching Protocols\r\n" +
+			                        "Upgrade: websocket\r\n" +
+			                        "Connection: Upgrade\r\n" +
+			                        $"Sec-WebSocket-Accept: {acceptKey}\r\n\r\n";
+
+			byte[] responseBytes = Encoding.UTF8.GetBytes( responseHeader );
+			await stream.WriteAsync( responseBytes, 0, responseBytes.Length, ct );
+			await stream.FlushAsync( ct );
+
+			// 2. Wrap stream in managed WebSocket instance
+			ws = NetWebSocket.CreateFromStream( stream, isServer: true, subProtocol: null, TimeSpan.FromSeconds( 30 ) );
+
 			clientPeerId = Guid.NewGuid().ToString( "N" ).Substring( 0, 8 );
 			_clients[clientPeerId] = ws;
 
+			Log.Info( $"[TeamSync] Remote peer connected from {tcpClient.Client.RemoteEndPoint} (temp id: {clientPeerId})" );
+
+			// 3. Receive Loop
 			var buffer = new byte[64 * 1024];
 			var ms = new MemoryStream();
 
 			while ( ws.State == NetWebSocketState.Open && !ct.IsCancellationRequested )
 			{
 				ms.SetLength( 0 );
-				System.Net.WebSockets.WebSocketReceiveResult result;
+				WebSocketReceiveResult result;
 				do
 				{
 					result = await ws.ReceiveAsync( new ArraySegment<byte>( buffer ), ct );
@@ -187,7 +191,7 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 					var envelope = TeamSyncEnvelope.Deserialize( json );
 					if ( envelope != null )
 					{
-						// If this is a Hello, update the peer mapping
+						// If this is a Hello, associate the official peer ID
 						if ( envelope.Type == TeamSyncMessageType.Hello && !string.IsNullOrEmpty( envelope.SenderId ) )
 						{
 							string oldId = clientPeerId;
@@ -197,10 +201,10 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 							OnPeerConnected?.Invoke( clientPeerId );
 						}
 
-						// Dispatch locally
+						// Dispatch locally on host
 						OnMessageReceived?.Invoke( envelope );
 
-						// Re-broadcast to all other clients
+						// Re-broadcast to all other connected peers
 						await BroadcastAsync( envelope, exceptPeerId: clientPeerId );
 					}
 				}
@@ -226,14 +230,48 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 				ws?.Dispose();
 			}
 			catch { }
+			try
+			{
+				tcpClient.Close();
+				tcpClient.Dispose();
+			}
+			catch { }
 		}
+	}
+
+	private static async Task<string> ReadWebSocketHandshakeKeyAsync( NetworkStream stream, CancellationToken ct )
+	{
+		var buffer = new byte[4096];
+		int totalRead = 0;
+
+		while ( totalRead < buffer.Length )
+		{
+			int read = await stream.ReadAsync( buffer, totalRead, buffer.Length - totalRead, ct );
+			if ( read <= 0 ) return null;
+			totalRead += read;
+
+			string text = Encoding.UTF8.GetString( buffer, 0, totalRead );
+			if ( text.Contains( "\r\n\r\n" ) )
+			{
+				// Extract Sec-WebSocket-Key
+				foreach ( var line in text.Split( "\r\n" ) )
+				{
+					if ( line.StartsWith( "Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase ) )
+					{
+						return line.Substring( "Sec-WebSocket-Key:".Length ).Trim();
+					}
+				}
+				break;
+			}
+		}
+
+		return null;
 	}
 
 	public async Task SendAsync( TeamSyncEnvelope envelope )
 	{
 		if ( !IsRunning || envelope == null ) return;
 
-		// Server sending to a specific client or processing locally
 		if ( !string.IsNullOrEmpty( envelope.SenderId ) && _clients.TryGetValue( envelope.SenderId, out var ws ) )
 		{
 			if ( ws.State == NetWebSocketState.Open )
@@ -244,7 +282,6 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 		}
 		else
 		{
-			// Broadcast
 			await BroadcastAsync( envelope );
 		}
 	}

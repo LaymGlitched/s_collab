@@ -3,6 +3,7 @@ namespace Editor.TeamSync;
 /// <summary>
 /// Handles generating and parsing user-friendly Room Codes, invite links,
 /// and formatted chat invite messages for frictionless session sharing.
+/// Supports single codes and Smart Dual Codes (containing both LAN and Public WAN addresses).
 /// </summary>
 public static class SessionCode
 {
@@ -11,17 +12,14 @@ public static class SessionCode
 
 	/// <summary>
 	/// Encodes an IP and port into a compact, human-readable Room Code.
-	/// Example: 192.168.1.50:29015 -> SYNC-192-168-1-50-29015 or Base64 token.
 	/// </summary>
 	public static string Encode( string host, int port )
 	{
 		if ( string.IsNullOrWhiteSpace( host ) ) host = "127.0.0.1";
 		if ( port <= 0 ) port = 29015;
 
-		// Clean up host string
 		host = host.Trim();
 
-		// Check if it's an IPv4
 		if ( IPAddress.TryParse( host, out var ip ) && ip.AddressFamily == AddressFamily.InterNetwork )
 		{
 			var bytes = ip.GetAddressBytes();
@@ -36,12 +34,38 @@ public static class SessionCode
 	}
 
 	/// <summary>
-	/// Attempts to parse any input string (Room Code, IP:Port, teamsync:// URL, or full chat message).
+	/// Encodes both a LAN IP and a Public WAN IP into a single Smart Dual Room Code.
+	/// When joined, the client automatically attempts the LAN address first, and falls back to WAN!
 	/// </summary>
-	public static bool TryParse( string input, out string host, out int port, out string error )
+	public static string EncodeDual( string lanHost, string wanHost, int port )
+	{
+		if ( string.IsNullOrWhiteSpace( lanHost ) ) lanHost = "127.0.0.1";
+		if ( string.IsNullOrWhiteSpace( wanHost ) || wanHost == lanHost )
+		{
+			return Encode( lanHost, port );
+		}
+
+		if ( IPAddress.TryParse( lanHost, out var lanIp ) && IPAddress.TryParse( wanHost, out var wanIp ) &&
+		     lanIp.AddressFamily == AddressFamily.InterNetwork && wanIp.AddressFamily == AddressFamily.InterNetwork )
+		{
+			var lanBytes = lanIp.GetAddressBytes();
+			var wanBytes = wanIp.GetAddressBytes();
+			string lanHex = $"{lanBytes[0]:X2}{lanBytes[1]:X2}{lanBytes[2]:X2}{lanBytes[3]:X2}";
+			string wanHex = $"{wanBytes[0]:X2}{wanBytes[1]:X2}{wanBytes[2]:X2}{wanBytes[3]:X2}";
+			return $"{Prefix}-{lanHex}-{wanHex}-{port}";
+		}
+
+		return Encode( wanHost, port );
+	}
+
+	/// <summary>
+	/// Attempts to parse any input string (Room Code, IP:Port, URL, or chat message) with optional fallback host.
+	/// </summary>
+	public static bool TryParse( string input, out string host, out int port, out string fallbackHost, out string error )
 	{
 		host = null;
 		port = 29015;
+		fallbackHost = null;
 		error = null;
 
 		if ( string.IsNullOrWhiteSpace( input ) )
@@ -52,7 +76,7 @@ public static class SessionCode
 
 		input = input.Trim();
 
-		// 1. If it's a URL like teamsync://192.168.1.50:29015 or ws://...
+		// 1. If it's a URL
 		if ( input.StartsWith( UrlPrefix, StringComparison.OrdinalIgnoreCase ) )
 		{
 			input = input.Substring( UrlPrefix.Length ).Trim( '/' );
@@ -66,23 +90,32 @@ public static class SessionCode
 			input = input.Substring( 7 ).Trim( '/' );
 		}
 
-		// 2. If it contains a SYNC- code anywhere in the text (e.g. from a chat message)
+		// 2. If it contains a SYNC- code anywhere in the text (e.g. from chat message)
 		int codeIdx = input.IndexOf( "SYNC-", StringComparison.OrdinalIgnoreCase );
 		if ( codeIdx >= 0 )
 		{
-			int endIdx = input.IndexOfAny( new[] { ' ', '\r', '\n', '\t', ')' }, codeIdx );
+			int endIdx = input.IndexOfAny( new[] { ' ', '\r', '\n', '\t', ')', ']' }, codeIdx );
 			string code = endIdx > codeIdx ? input.Substring( codeIdx, endIdx - codeIdx ) : input.Substring( codeIdx );
-			return TryParseCode( code, out host, out port, out error );
+			return TryParseCode( code, out host, out port, out fallbackHost, out error );
 		}
 
 		// 3. Try standard IP:Port or Host:Port parsing
 		return TryParseHostPort( input, out host, out port, out error );
 	}
 
-	private static bool TryParseCode( string code, out string host, out int port, out string error )
+	/// <summary>
+	/// Backward compatible overload without fallbackHost.
+	/// </summary>
+	public static bool TryParse( string input, out string host, out int port, out string error )
+	{
+		return TryParse( input, out host, out port, out _, out error );
+	}
+
+	private static bool TryParseCode( string code, out string host, out int port, out string fallbackHost, out string error )
 	{
 		host = null;
 		port = 29015;
+		fallbackHost = null;
 		error = null;
 
 		var parts = code.Split( '-' );
@@ -92,18 +125,34 @@ public static class SessionCode
 			return false;
 		}
 
-		// Format: SYNC-AABBCCDD-PORT (Hex IPv4)
-		if ( parts.Length == 3 && parts[1].Length == 8 && int.TryParse( parts[2], out int p ) )
+		// Format: SYNC-<LAN_HEX>-<WAN_HEX>-<PORT> (Smart Dual Code)
+		if ( parts.Length == 4 && parts[1].Length == 8 && parts[2].Length == 8 && int.TryParse( parts[3], out int dualPort ) )
 		{
 			try
 			{
-				byte b0 = Convert.ToByte( parts[1].Substring( 0, 2 ), 16 );
-				byte b1 = Convert.ToByte( parts[1].Substring( 2, 2 ), 16 );
-				byte b2 = Convert.ToByte( parts[1].Substring( 4, 2 ), 16 );
-				byte b3 = Convert.ToByte( parts[1].Substring( 6, 2 ), 16 );
+				string lanIp = DecodeHexIp( parts[1] );
+				string wanIp = DecodeHexIp( parts[2] );
+				port = dualPort;
 
-				host = $"{b0}.{b1}.{b2}.{b3}";
-				port = p;
+				// Primary is LAN, fallback is WAN
+				host = lanIp;
+				fallbackHost = wanIp;
+				return true;
+			}
+			catch ( Exception ex )
+			{
+				error = $"Failed to decode dual IP code: {ex.Message}";
+				return false;
+			}
+		}
+
+		// Format: SYNC-<HEX>-<PORT> (Single IP Hex Code)
+		if ( parts.Length == 3 && parts[1].Length == 8 && int.TryParse( parts[2], out int singlePort ) )
+		{
+			try
+			{
+				host = DecodeHexIp( parts[1] );
+				port = singlePort;
 				return true;
 			}
 			catch ( Exception ex )
@@ -140,6 +189,15 @@ public static class SessionCode
 		return false;
 	}
 
+	private static string DecodeHexIp( string hex )
+	{
+		byte b0 = Convert.ToByte( hex.Substring( 0, 2 ), 16 );
+		byte b1 = Convert.ToByte( hex.Substring( 2, 2 ), 16 );
+		byte b2 = Convert.ToByte( hex.Substring( 4, 2 ), 16 );
+		byte b3 = Convert.ToByte( hex.Substring( 6, 2 ), 16 );
+		return $"{b0}.{b1}.{b2}.{b3}";
+	}
+
 	private static bool TryParseHostPort( string input, out string host, out int port, out string error )
 	{
 		host = null;
@@ -162,15 +220,11 @@ public static class SessionCode
 			return true;
 		}
 
-		// If no colon, treat entire input as host and use default port
 		host = input;
 		port = 29015;
 		return true;
 	}
 
-	/// <summary>
-	/// Generates a friendly, formatted invite message suitable for pasting into Steam / Discord / Slack.
-	/// </summary>
 	public static string CreateInviteMessage( string hostName, string projectName, string roomCode, string directEndpoint )
 	{
 		return $"🎮 Join {hostName}'s s&box Team Sync session for '{projectName}'!\n" +

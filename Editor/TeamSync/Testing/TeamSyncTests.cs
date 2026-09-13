@@ -101,7 +101,14 @@ public static class TeamSyncTests
 			if ( !SessionCode.TryParse( chatMsg, out host, out port, out _ ) || host != "192.168.1.50" || port != 29015 )
 				return new TestResult { Name = "Room Code System", Passed = false, Message = "Failed to extract room code from rich chat invite message." };
 
-			return new TestResult { Name = "Room Code System", Passed = true, Message = "Room Code hex encoding, URL parsing, and chat invite extraction verified." };
+			// 4. Smart Dual Code (LAN + WAN)
+			string dualCode = SessionCode.EncodeDual( "192.168.1.50", "82.24.100.5", 29015 );
+			if ( !SessionCode.TryParse( dualCode, out host, out port, out string fallback, out _ ) )
+				return new TestResult { Name = "Room Code System", Passed = false, Message = "Failed to parse smart dual room code." };
+			if ( host != "192.168.1.50" || fallback != "82.24.100.5" || port != 29015 )
+				return new TestResult { Name = "Room Code System", Passed = false, Message = $"Dual code values mismatch: {host}, {fallback}:{port}" };
+
+			return new TestResult { Name = "Room Code System", Passed = true, Message = "Room Code hex encoding, URL parsing, chat invite extraction, and Smart Dual Codes verified." };
 		}
 		catch ( Exception ex )
 		{

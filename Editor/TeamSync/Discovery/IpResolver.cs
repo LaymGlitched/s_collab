@@ -12,6 +12,8 @@ public static class IpResolver
 	private static DateTime _lastPublicIpFetch = DateTime.MinValue;
 	private static readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds( 3 ) };
 
+	public static string GetCachedPublicIp() => _cachedPublicIp;
+
 	/// <summary>
 	/// Returns the best local IPv4 address on the machine.
 	/// </summary>

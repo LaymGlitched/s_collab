@@ -77,10 +77,13 @@ public sealed class TeamSyncManager
 		LanDiscoveryService.Instance.StopListening();
 		LanDiscoveryService.Instance.StartBroadcasting( port, Project.Current?.Config?.Title ?? "s_collab", LocalPersonaName, LocalSteamId, () => Collaborators.Count );
 
+		// Attempt automatic UPnP router port forwarding in background
+		_ = UpnpHelper.TryForwardPortAsync( port );
+
 		OnSessionStateChanged?.Invoke();
 	}
 
-	public async Task JoinSessionAsync( string hostAddress, int port = 29015 )
+	public async Task<bool> JoinSessionAsync( string hostAddress, int port = 29015 )
 	{
 		await LeaveSessionAsync();
 
@@ -89,12 +92,20 @@ public sealed class TeamSyncManager
 			hostAddress = "127.0.0.1";
 		}
 
+		Log.Info( $"[TeamSync] Connecting to {hostAddress}:{port}..." );
 		var client = new TeamSyncClient( LocalPeerId, hostAddress, port );
 		AttachTransport( client );
 
 		await client.StartAsync();
 
-		// Register self
+		if ( !client.IsRunning )
+		{
+			Log.Error( $"[TeamSync] ❌ Connection failed to {hostAddress}:{port}: {client.StatusText}" );
+			await LeaveSessionAsync();
+			return false;
+		}
+
+		// Register self ONLY after successful socket connection!
 		var self = new CollaboratorState( LocalPeerId, LocalPersonaName, LocalSteamId, LocalColor.Hex )
 		{
 			IsHost = false
@@ -113,19 +124,26 @@ public sealed class TeamSyncManager
 		SyncSystem.Reset();
 		LanDiscoveryService.Instance.StopListening();
 		OnSessionStateChanged?.Invoke();
+		Log.Info( $"[TeamSync] ✅ Successfully connected to host at {hostAddress}:{port}!" );
+		return true;
 	}
 
 	public async Task<bool> JoinByCodeAsync( string codeOrInput )
 	{
-		if ( !SessionCode.TryParse( codeOrInput, out var host, out var port, out var err ) )
+		if ( !SessionCode.TryParse( codeOrInput, out var host, out var port, out var fallbackHost, out var err ) )
 		{
 			Log.Error( $"[TeamSync] Could not parse session code '{codeOrInput}': {err}" );
 			return false;
 		}
 
-		Log.Info( $"[TeamSync] Connecting to {host}:{port}..." );
-		await JoinSessionAsync( host, port );
-		return true;
+		bool success = await JoinSessionAsync( host, port );
+		if ( !success && !string.IsNullOrEmpty( fallbackHost ) && fallbackHost != host )
+		{
+			Log.Info( $"[TeamSync] Local endpoint {host}:{port} unreachable. Retrying with internet WAN endpoint {fallbackHost}:{port}..." );
+			success = await JoinSessionAsync( fallbackHost, port );
+		}
+
+		return success;
 	}
 
 	public string GetActiveRoomCode()
@@ -133,13 +151,28 @@ public sealed class TeamSyncManager
 		if ( !IsSessionActive ) return string.Empty;
 		if ( IsHost && Transport is TeamSyncServer srv )
 		{
-			return SessionCode.Encode( IpResolver.GetPrimaryLocalIp(), srv.Port );
+			string lan = IpResolver.GetPrimaryLocalIp();
+			string wan = IpResolver.GetCachedPublicIp();
+			return SessionCode.EncodeDual( lan, wan, srv.Port );
 		}
 		if ( !IsHost && Transport is TeamSyncClient cli )
 		{
 			return SessionCode.Encode( cli.HostAddress, cli.Port );
 		}
 		return string.Empty;
+	}
+
+	public string GetPublicRoomCode()
+	{
+		if ( !IsSessionActive || !IsHost || Transport is not TeamSyncServer srv ) return string.Empty;
+		string wan = IpResolver.GetCachedPublicIp() ?? IpResolver.GetPrimaryLocalIp();
+		return SessionCode.Encode( wan, srv.Port );
+	}
+
+	public string GetLocalRoomCode()
+	{
+		if ( !IsSessionActive || !IsHost || Transport is not TeamSyncServer srv ) return string.Empty;
+		return SessionCode.Encode( IpResolver.GetPrimaryLocalIp(), srv.Port );
 	}
 
 	[ConCmd( "teamsync_join" )]

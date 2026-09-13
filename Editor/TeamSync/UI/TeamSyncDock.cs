@@ -2,7 +2,7 @@ namespace Editor.TeamSync;
 
 /// <summary>
 /// Editor Dock Widget providing zero-friction session management, Steam friend invitations,
-/// LAN auto-discovery, 1-click clipboard joining, live collaborator listing, and diagnostics.
+/// LAN auto-discovery, smart dual room codes, live collaborator listing, and diagnostics.
 /// </summary>
 [Dock( "Editor", "Team Sync", "groups" )]
 public sealed class TeamSyncDock : Widget
@@ -15,6 +15,7 @@ public sealed class TeamSyncDock : Widget
 	private string _cachedStateHash = string.Empty;
 	private string _primaryLocalIp = "127.0.0.1";
 	private string _publicIp = "Resolving...";
+	private string _lastJoinError = string.Empty;
 
 	public TeamSyncDock( Widget parent ) : base( parent )
 	{
@@ -27,7 +28,6 @@ public sealed class TeamSyncDock : Widget
 
 		LanDiscoveryService.Instance.OnSessionsChanged += () =>
 		{
-			// Trigger re-render when LAN hosts appear/disappear
 			_cachedStateHash = string.Empty;
 		};
 
@@ -111,6 +111,7 @@ public sealed class TeamSyncDock : Widget
 				var joinLanBtn = new Button.Primary( "⚡ 1-Click Join", "login" );
 				joinLanBtn.Clicked = () =>
 				{
+					_lastJoinError = string.Empty;
 					_ = TeamSyncManager.Instance.JoinSessionAsync( session.HostAddress, session.Port );
 				};
 				card.Add( joinLanBtn );
@@ -128,7 +129,7 @@ public sealed class TeamSyncDock : Widget
 
 		// Prominent Join from Clipboard Button
 		var clipboardJoinBtn = new Button.Primary( "📋 Join from Clipboard", "content_paste" );
-		clipboardJoinBtn.Clicked = () =>
+		clipboardJoinBtn.Clicked = async () =>
 		{
 			string clip = EditorUtility.Clipboard.Paste();
 			if ( string.IsNullOrWhiteSpace( clip ) )
@@ -137,7 +138,13 @@ public sealed class TeamSyncDock : Widget
 				return;
 			}
 
-			_ = TeamSyncManager.Instance.JoinByCodeAsync( clip );
+			_lastJoinError = string.Empty;
+			bool joined = await TeamSyncManager.Instance.JoinByCodeAsync( clip );
+			if ( !joined )
+			{
+				_lastJoinError = $"Could not connect to target in clipboard. Verify host is running and port is reachable.";
+				_cachedStateHash = string.Empty;
+			}
 		};
 		joinGroup.Add( clipboardJoinBtn );
 
@@ -149,15 +156,28 @@ public sealed class TeamSyncDock : Widget
 		joinControls.Add( _joinCodeOrAddressInput, 1 );
 
 		var directJoinBtn = new Button( "Join", "arrow_forward" );
-		directJoinBtn.Clicked = () =>
+		directJoinBtn.Clicked = async () =>
 		{
 			string input = _joinCodeOrAddressInput.Text;
 			if ( !string.IsNullOrWhiteSpace( input ) )
 			{
-				_ = TeamSyncManager.Instance.JoinByCodeAsync( input );
+				_lastJoinError = string.Empty;
+				bool joined = await TeamSyncManager.Instance.JoinByCodeAsync( input );
+				if ( !joined )
+				{
+					_lastJoinError = $"Connection failed to '{input}'. If connecting over the internet, verify host forwarded port 29015 or is on Tailscale.";
+					_cachedStateHash = string.Empty;
+				}
 			}
 		};
 		joinControls.Add( directJoinBtn );
+
+		// Last connection error banner if any
+		if ( !string.IsNullOrEmpty( _lastJoinError ) )
+		{
+			var errorLabel = joinGroup.Add( new Label( $"⚠️ {_lastJoinError}" ) );
+			errorLabel.Color = Theme.Red;
+		}
 
 		_content.AddSeparator();
 
@@ -168,23 +188,18 @@ public sealed class TeamSyncDock : Widget
 		var hostHeader = hostGroup.AddRow();
 		hostHeader.Add( new Label( "Host a Session" ), 1 );
 
-		// Local IP & WAN info badge
+		// Network IPs row
 		var ipInfoRow = hostGroup.AddRow();
-		ipInfoRow.Spacing = 8;
+		ipInfoRow.Spacing = 6;
 		ipInfoRow.Alignment = TextFlag.LeftCenter;
 
 		var lanBadge = new Label( $"LAN: {_primaryLocalIp}" );
 		lanBadge.Color = Theme.Text.WithAlpha( 0.7f );
 		ipInfoRow.Add( lanBadge );
 
-		var copyLanBtn = new Button( null, "content_copy" );
-		copyLanBtn.ToolTip = "Copy Local LAN IP";
-		copyLanBtn.Clicked = () =>
-		{
-			EditorUtility.Clipboard.Copy( _primaryLocalIp );
-			Log.Info( $"[TeamSync] Copied LAN IP: {_primaryLocalIp}" );
-		};
-		ipInfoRow.Add( copyLanBtn );
+		var wanBadge = new Label( $"Public: {_publicIp}" );
+		wanBadge.Color = Theme.Blue;
+		ipInfoRow.Add( wanBadge, 1 );
 
 		var hostControls = hostGroup.AddRow();
 		hostControls.Spacing = 6;
@@ -201,6 +216,9 @@ public sealed class TeamSyncDock : Widget
 			_ = TeamSyncManager.Instance.HostSessionAsync( port );
 		};
 		hostControls.Add( hostButton, 1 );
+
+		var hostHelp = hostGroup.Add( new Label( "Tip: For internet friends, port 29015 must be forwarded on your router (or both connect via Tailscale/ZeroTier)." ) );
+		hostHelp.Color = Theme.Text.WithAlpha( 0.5f );
 
 		_content.AddSeparator();
 
@@ -235,7 +253,10 @@ public sealed class TeamSyncDock : Widget
 		var manager = TeamSyncManager.Instance;
 
 		string roomCode = manager.GetActiveRoomCode();
+		string publicRoomCode = manager.GetPublicRoomCode();
+		string localRoomCode = manager.GetLocalRoomCode();
 		int port = (manager.Transport as TeamSyncServer)?.Port ?? 29015;
+		string publicEndpoint = $"{_publicIp}:{port}";
 		string lanEndpoint = $"{_primaryLocalIp}:{port}";
 
 		// 1. Session Bar
@@ -255,42 +276,59 @@ public sealed class TeamSyncDock : Widget
 		};
 		sessionBar.Add( leaveBtn );
 
-		// 2. Share & Invite Box
-		var inviteGroup = _content.AddColumn();
-		inviteGroup.Spacing = 6;
-
-		var codeRow = inviteGroup.AddRow();
-		codeRow.Spacing = 6;
-		codeRow.Alignment = TextFlag.LeftCenter;
-		codeRow.Add( new Label( "Room Code:" ) );
-
-		var codeBadge = new Label( string.IsNullOrEmpty( roomCode ) ? lanEndpoint : roomCode );
-		codeBadge.Color = Theme.Blue;
-		codeRow.Add( codeBadge, 1 );
-
-		var inviteButtonsRow = inviteGroup.AddRow();
-		inviteButtonsRow.Spacing = 6;
-
-		// Steam Invite Button
-		var steamInviteBtn = new Button.Primary( "🎮 Invite via Steam", "sports_esports" );
-		steamInviteBtn.ToolTip = "Copies formatted invite message and opens Steam friends list";
-		steamInviteBtn.Clicked = () =>
+		// 2. Share & Invite Box (for Host)
+		if ( manager.IsHost )
 		{
-			string projectTitle = Project.Current?.Config?.Title ?? "s_collab";
-			SteamInviteHelper.InviteViaSteam( manager.LocalPersonaName, projectTitle, roomCode, lanEndpoint );
-		};
-		inviteButtonsRow.Add( steamInviteBtn, 1 );
+			var inviteGroup = _content.AddColumn();
+			inviteGroup.Spacing = 6;
 
-		// Copy Room Code Button
-		var copyCodeBtn = new Button( "📋 Copy Code", "content_copy" );
-		copyCodeBtn.Clicked = () =>
-		{
-			EditorUtility.Clipboard.Copy( string.IsNullOrEmpty( roomCode ) ? lanEndpoint : roomCode );
-			Log.Info( $"[TeamSync] Room Code copied to clipboard: {roomCode}" );
-		};
-		inviteButtonsRow.Add( copyCodeBtn, 1 );
+			var codeRow = inviteGroup.AddRow();
+			codeRow.Spacing = 6;
+			codeRow.Alignment = TextFlag.LeftCenter;
+			codeRow.Add( new Label( "Room Code:" ) );
 
-		_content.AddSeparator();
+			var codeBadge = new Label( string.IsNullOrEmpty( roomCode ) ? lanEndpoint : roomCode );
+			codeBadge.Color = Theme.Blue;
+			codeRow.Add( codeBadge, 1 );
+
+			var inviteButtonsRow = inviteGroup.AddRow();
+			inviteButtonsRow.Spacing = 6;
+
+			// Steam Invite Button (uses public WAN / Smart Code so internet friends can connect)
+			var steamInviteBtn = new Button.Primary( "🎮 Invite via Steam", "sports_esports" );
+			steamInviteBtn.ToolTip = "Copies formatted invite with public IP to clipboard and opens Steam Friends list";
+			steamInviteBtn.Clicked = () =>
+			{
+				string projectTitle = Project.Current?.Config?.Title ?? "s_collab";
+				string shareCode = !string.IsNullOrEmpty( publicRoomCode ) ? publicRoomCode : roomCode;
+				SteamInviteHelper.InviteViaSteam( manager.LocalPersonaName, projectTitle, shareCode, publicEndpoint );
+			};
+			inviteButtonsRow.Add( steamInviteBtn, 1 );
+
+			// Copy Internet Code Button
+			var copyWanCodeBtn = new Button( "🌐 Copy Internet Code", "public" );
+			copyWanCodeBtn.ToolTip = "Room Code for friends across the internet (Public WAN IP)";
+			copyWanCodeBtn.Clicked = () =>
+			{
+				string codeToCopy = !string.IsNullOrEmpty( publicRoomCode ) ? publicRoomCode : roomCode;
+				EditorUtility.Clipboard.Copy( codeToCopy );
+				Log.Info( $"[TeamSync] Internet Room Code copied to clipboard: {codeToCopy}" );
+			};
+			inviteButtonsRow.Add( copyWanCodeBtn, 1 );
+
+			// Copy LAN Code Button
+			var copyLanCodeBtn = new Button( "🏠 Copy LAN Code", "home" );
+			copyLanCodeBtn.ToolTip = "Room Code for friends on the same local Wi-Fi / network";
+			copyLanCodeBtn.Clicked = () =>
+			{
+				string codeToCopy = !string.IsNullOrEmpty( localRoomCode ) ? localRoomCode : lanEndpoint;
+				EditorUtility.Clipboard.Copy( codeToCopy );
+				Log.Info( $"[TeamSync] Local LAN Room Code copied to clipboard: {codeToCopy}" );
+			};
+			inviteButtonsRow.Add( copyLanCodeBtn, 1 );
+
+			_content.AddSeparator();
+		}
 
 		// 3. Collaborators Section
 		var collabHeader = _content.AddRow();
@@ -409,7 +447,7 @@ public sealed class TeamSyncDock : Widget
 
 		var manager = TeamSyncManager.Instance;
 		int discoveredCount = LanDiscoveryService.Instance.DiscoveredSessions.Count;
-		string currentStateHash = $"{manager.IsSessionActive}_{manager.Collaborators.Count}_{manager.LockSystem.ActiveLocks.Count}_{manager.StatusText}_{discoveredCount}_{_publicIp}";
+		string currentStateHash = $"{manager.IsSessionActive}_{manager.Collaborators.Count}_{manager.LockSystem.ActiveLocks.Count}_{manager.StatusText}_{discoveredCount}_{_publicIp}_{_lastJoinError}";
 
 		if ( currentStateHash != _cachedStateHash )
 		{
