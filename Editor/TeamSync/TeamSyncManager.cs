@@ -34,9 +34,7 @@ public sealed class TeamSyncManager
 	private TeamSyncManager()
 	{
 		LocalPeerId = Guid.NewGuid().ToString( "N" ).Substring( 0, 8 );
-		LocalPersonaName = Environment.UserName ?? "Collaborator";
-		LocalSteamId = (ulong)Math.Abs( (long)LocalPersonaName.GetHashCode() );
-		LocalColor = CollaboratorState.GenerateDeterministicColor( LocalSteamId != 0 ? LocalSteamId : (ulong)LocalPeerId.GetHashCode() );
+		RefreshLocalIdentity();
 
 		LockSystem = new SelectionLockSystem( this );
 		SyncSystem = new SceneSyncSystem( this );
@@ -45,18 +43,56 @@ public sealed class TeamSyncManager
 		LanDiscoveryService.Instance.StartListening();
 	}
 
+	public void RefreshLocalIdentity()
+	{
+		try
+		{
+			string steamName = Sandbox.Utility.Steam.PersonaName;
+			ulong steamId = Sandbox.Utility.Steam.SteamId;
+
+			if ( !string.IsNullOrWhiteSpace( steamName ) )
+			{
+				LocalPersonaName = steamName;
+			}
+			else if ( string.IsNullOrWhiteSpace( LocalPersonaName ) || LocalPersonaName == "Collaborator" )
+			{
+				LocalPersonaName = Environment.UserName ?? "Collaborator";
+			}
+
+			if ( steamId != 0 )
+			{
+				LocalSteamId = steamId;
+			}
+			else if ( LocalSteamId == 0 )
+			{
+				LocalSteamId = (ulong)Math.Abs( (long)LocalPersonaName.GetHashCode() );
+			}
+
+			LocalColor = CollaboratorState.GenerateDeterministicColor( LocalSteamId != 0 ? LocalSteamId : (ulong)LocalPeerId.GetHashCode() );
+		}
+		catch
+		{
+			if ( string.IsNullOrWhiteSpace( LocalPersonaName ) )
+			{
+				LocalPersonaName = Environment.UserName ?? "Collaborator";
+			}
+		}
+	}
+
 	[EditorEvent.Hotload]
 	private static void OnHotload()
 	{
 		// Preserve singleton instance across hotloads
 		if ( _instance != null )
 		{
+			_instance.RefreshLocalIdentity();
 			_instance.SyncSystem?.RebuildBaseline();
 		}
 	}
 
 	public async Task HostSessionAsync( int port = 29020 )
 	{
+		RefreshLocalIdentity();
 		await LeaveSessionAsync();
 
 		var server = new TeamSyncServer( LocalPeerId, port );
@@ -87,6 +123,7 @@ public sealed class TeamSyncManager
 
 	public async Task<bool> JoinSessionAsync( string hostAddress, int port = 29015 )
 	{
+		RefreshLocalIdentity();
 		await LeaveSessionAsync();
 
 		if ( string.IsNullOrWhiteSpace( hostAddress ) )

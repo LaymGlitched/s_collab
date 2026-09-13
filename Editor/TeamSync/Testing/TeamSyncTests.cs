@@ -17,24 +17,11 @@ public static class TeamSyncTests
 	public static void DiscoverNetworkingApis()
 	{
 		Log.Info( "=================================================" );
-		Log.Info( "[TeamSync] Introspecting Types for Steam and Networking..." );
+		Log.Info( "[TeamSync] Introspecting Sandbox.Utility.Steam..." );
 		Log.Info( "=================================================" );
 
-		foreach ( var type in TypeLibrary.GetTypes() )
-		{
-			string name = type.Name;
-			if ( name.Contains( "Steam", StringComparison.OrdinalIgnoreCase ) ||
-			     name.Contains( "Lobby", StringComparison.OrdinalIgnoreCase ) ||
-			     name.Contains( "Networking", StringComparison.OrdinalIgnoreCase ) ||
-			     name.Contains( "Socket", StringComparison.OrdinalIgnoreCase ) )
-			{
-				Log.Info( $"[Found Type] {type.FullName} (Identity: {type.Identity})" );
-				foreach ( var m in type.Members.Where( m => m.IsPublic ).Take( 10 ) )
-				{
-					Log.Info( $"   Member: {m.Name}" );
-				}
-			}
-		}
+		Log.Info( $"[TeamSync] Steam.PersonaName = '{Sandbox.Utility.Steam.PersonaName}'" );
+		Log.Info( $"[TeamSync] Steam.SteamId = '{Sandbox.Utility.Steam.SteamId}'" );
 	}
 
 	[ConCmd( "teamsync_test" )]

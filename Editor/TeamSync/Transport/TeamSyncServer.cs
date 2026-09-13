@@ -257,9 +257,9 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 		{
 			// Normal shutdown or connection termination
 		}
-		catch ( WebSocketException ) when ( ct.IsCancellationRequested )
+		catch ( WebSocketException )
 		{
-			// Server was stopped
+			// Remote peer disconnected
 		}
 		catch ( Exception ex )
 		{
