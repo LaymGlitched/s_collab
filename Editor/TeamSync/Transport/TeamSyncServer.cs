@@ -228,6 +228,8 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 					var envelope = TeamSyncEnvelope.Deserialize( json );
 					if ( envelope != null )
 					{
+						Log.Info( $"[TeamSync] 📥 Server received envelope '{envelope.Type}' from peer '{envelope.SenderId}'" );
+
 						// If this is a Hello, associate the official peer ID
 						if ( envelope.Type == TeamSyncMessageType.Hello && !string.IsNullOrEmpty( envelope.SenderId ) )
 						{
@@ -244,11 +246,16 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 						// Re-broadcast to all other connected peers
 						await BroadcastAsync( envelope, exceptPeerId: clientPeerId );
 					}
+					else
+					{
+						Log.Warning( $"[TeamSync] Server received unparseable message: {json}" );
+					}
 				}
 			}
 		}
 		catch ( Exception ex )
 		{
+			Log.Error( $"[TeamSync] ❌ Server client handler exception for '{clientPeerId}': {ex}" );
 			if ( !ct.IsCancellationRequested && ws?.State != NetWebSocketState.Closed )
 			{
 				OnError?.Invoke( $"Client error ({clientPeerId}): {ex.Message}" );

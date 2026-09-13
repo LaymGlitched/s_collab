@@ -205,7 +205,15 @@ public sealed class TeamSyncManager
 	private void AttachTransport( ITeamSyncTransport transport )
 	{
 		Transport = transport;
-		Transport.OnMessageReceived += msg => _inboundQueue.Enqueue( msg );
+		Transport.OnMessageReceived += msg =>
+		{
+			_inboundQueue.Enqueue( msg );
+			// Immediately process connection and handshake envelopes
+			if ( msg.Type == TeamSyncMessageType.Hello || msg.Type == TeamSyncMessageType.Welcome || msg.Type == TeamSyncMessageType.PeerJoined )
+			{
+				ProcessEnvelope( msg );
+			}
+		};
 		Transport.OnPeerDisconnected += peerId =>
 		{
 			Collaborators.TryRemove( peerId, out _ );
@@ -251,7 +259,12 @@ public sealed class TeamSyncManager
 	}
 
 	[EditorEvent.Frame]
-	private void FrameUpdate()
+	public static void GlobalFrameUpdate()
+	{
+		_instance?.FrameUpdate();
+	}
+
+	public void FrameUpdate()
 	{
 		// 1. Drain incoming messages on the main UI/Editor thread
 		while ( _inboundQueue.TryDequeue( out var envelope ) )
@@ -437,6 +450,8 @@ public sealed class TeamSyncManager
 		var hello = env.GetPayload<HelloPayload>();
 		if ( hello == null ) return;
 
+		Log.Info( $"[TeamSync] 🤝 Remote collaborator joined: {hello.PersonaName} (PeerId: {hello.PeerId})!" );
+
 		var peer = new CollaboratorState( hello.PeerId, hello.PersonaName, hello.SteamId, hello.ColorHex )
 		{
 			IsHost = false
@@ -457,13 +472,18 @@ public sealed class TeamSyncManager
 			};
 
 			_ = Transport.SendAsync( TeamSyncEnvelope.Create( TeamSyncMessageType.Welcome, LocalPeerId, welcome ) );
+			Log.Info( $"[TeamSync] 📤 Sent Welcome snapshot to {hello.PersonaName}." );
 		}
+
+		OnSessionStateChanged?.Invoke();
 	}
 
 	private void HandleWelcome( TeamSyncEnvelope env )
 	{
 		var welcome = env.GetPayload<WelcomePayload>();
 		if ( welcome == null ) return;
+
+		Log.Info( $"[TeamSync] 📥 Processed Welcome snapshot from host with {welcome.Peers.Count} peers." );
 
 		foreach ( var p in welcome.Peers )
 		{
