@@ -253,11 +253,19 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 				}
 			}
 		}
+		catch ( OperationCanceledException )
+		{
+			// Normal shutdown or connection termination
+		}
+		catch ( WebSocketException ) when ( ct.IsCancellationRequested )
+		{
+			// Server was stopped
+		}
 		catch ( Exception ex )
 		{
-			Log.Error( $"[TeamSync] ❌ Server client handler exception for '{clientPeerId}': {ex}" );
 			if ( !ct.IsCancellationRequested && ws?.State != NetWebSocketState.Closed )
 			{
+				Log.Error( $"[TeamSync] ❌ Server client handler exception for '{clientPeerId}': {ex.Message}" );
 				OnError?.Invoke( $"Client error ({clientPeerId}): {ex.Message}" );
 			}
 		}
