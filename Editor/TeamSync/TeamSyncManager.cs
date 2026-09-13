@@ -26,6 +26,8 @@ public sealed class TeamSyncManager
 	public event Action<string> OnCollaboratorLeft;
 
 	private readonly ConcurrentQueue<TeamSyncEnvelope> _inboundQueue = new();
+	private readonly List<TeamSyncEnvelope> _inboundPlayModeBuffer = new();
+	private bool _wasPlaying;
 	private Vector3 _lastBroadcastCamPos;
 	private Angles _lastBroadcastCamAngles;
 	private float _lastCamBroadcastTime;
@@ -115,6 +117,9 @@ public sealed class TeamSyncManager
 		LanDiscoveryService.Instance.StopListening();
 		LanDiscoveryService.Instance.StartBroadcasting( actualPort, Project.Current?.Config?.Title ?? "s_collab", LocalPersonaName, LocalSteamId, () => Collaborators.Count );
 
+		// Start real-time project asset/file synchronizer
+		ProjectFileSyncService.Instance.Start();
+
 		// Attempt automatic UPnP router port forwarding in background
 		_ = UpnpHelper.TryForwardPortAsync( actualPort );
 
@@ -150,6 +155,9 @@ public sealed class TeamSyncManager
 			IsHost = false
 		};
 		Collaborators[LocalPeerId] = self;
+
+		// Start real-time project asset/file synchronizer
+		ProjectFileSyncService.Instance.Start();
 
 		// Send Hello
 		await client.SendAsync( TeamSyncEnvelope.Create( TeamSyncMessageType.Hello, LocalPeerId, new HelloPayload
@@ -236,6 +244,7 @@ public sealed class TeamSyncManager
 		Collaborators[LocalPeerId] = self;
 
 		SyncSystem.Reset();
+		ProjectFileSyncService.Instance.Start();
 		OnSessionStateChanged?.Invoke();
 	}
 
@@ -259,6 +268,7 @@ public sealed class TeamSyncManager
 	public async Task LeaveSessionAsync()
 	{
 		LanDiscoveryService.Instance.StopBroadcasting();
+		ProjectFileSyncService.Instance.Stop();
 
 		if ( Transport != null )
 		{
@@ -277,6 +287,8 @@ public sealed class TeamSyncManager
 
 		Collaborators.Clear();
 		_lastLocalSelection.Clear();
+		_inboundPlayModeBuffer.Clear();
+		_wasPlaying = false;
 		SyncSystem.Reset();
 
 		// Resume listening for local sessions
@@ -316,7 +328,26 @@ public sealed class TeamSyncManager
 		}
 		catch { }
 
-		if ( !IsSessionActive || Game.IsPlaying ) return;
+		// Handle Play Mode exit -> apply buffered remote scene changes
+		if ( _wasPlaying && !Game.IsPlaying )
+		{
+			_wasPlaying = false;
+			Log.Info( $"[TeamSync] 🎮 Exited Play Mode. Applying {_inboundPlayModeBuffer.Count} buffered remote scene modifications..." );
+			foreach ( var env in _inboundPlayModeBuffer )
+			{
+				ApplySceneEnvelopeDirect( env );
+			}
+			_inboundPlayModeBuffer.Clear();
+			SyncSystem.Reset();
+		}
+
+		if ( !IsSessionActive ) return;
+
+		if ( Game.IsPlaying )
+		{
+			_wasPlaying = true;
+			return;
+		}
 
 		try
 		{
@@ -449,6 +480,12 @@ public sealed class TeamSyncManager
 	{
 		if ( env == null || env.SenderId == LocalPeerId ) return;
 
+		if ( Game.IsPlaying && ( env.Type == TeamSyncMessageType.SceneDelta || env.Type == TeamSyncMessageType.SceneSnapshot ) )
+		{
+			_inboundPlayModeBuffer.Add( env );
+			return;
+		}
+
 		switch ( env.Type )
 		{
 			case TeamSyncMessageType.Hello:
@@ -500,12 +537,35 @@ public sealed class TeamSyncManager
 				}
 				break;
 
+			case TeamSyncMessageType.FileSync:
+				var fileChunk = env.GetPayload<FileChunkPayload>();
+				if ( fileChunk != null )
+				{
+					ProjectFileSyncService.Instance.ApplyRemoteFile( fileChunk );
+				}
+				break;
+
 			case TeamSyncMessageType.PeerLeft:
 				string leftId = env.PayloadJson?.Trim( '"' ) ?? env.SenderId;
 				Collaborators.TryRemove( leftId, out _ );
 				LockSystem.ReleaseLocksForPeer( leftId );
 				OnCollaboratorLeft?.Invoke( leftId );
 				break;
+		}
+	}
+
+	private void ApplySceneEnvelopeDirect( TeamSyncEnvelope env )
+	{
+		if ( env == null ) return;
+		if ( env.Type == TeamSyncMessageType.SceneDelta )
+		{
+			var delta = env.GetPayload<SceneDeltaPayload>();
+			if ( delta != null ) SceneApplicator.ApplyDelta( delta );
+		}
+		else if ( env.Type == TeamSyncMessageType.SceneSnapshot )
+		{
+			var snapshot = env.GetPayload<SceneSnapshotPayload>();
+			if ( snapshot != null ) SceneApplicator.RestoreSceneSnapshot( snapshot.SceneJson );
 		}
 	}
 

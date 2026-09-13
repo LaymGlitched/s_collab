@@ -90,7 +90,7 @@ public static class PresenceOverlay
 					modelAsset = Model.Cube;
 				}
 
-				var transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation(), 1.25f );
+				var transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation(), 2.75f );
 				
 				model = new SceneModel( sceneWorld, modelAsset, transform );
 				model.ColorTint = peer.Color;
@@ -99,7 +99,7 @@ public static class PresenceOverlay
 			}
 
 			// Sync transform & color
-			model.Transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation(), 1.25f );
+			model.Transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation(), 2.75f );
 			if ( model.ColorTint != peer.Color )
 			{
 				model.ColorTint = peer.Color;
@@ -140,10 +140,10 @@ public static class PresenceOverlay
 		var color = peer.Color;
 
 		Gizmo.Draw.Color = color;
-		Gizmo.Draw.LineThickness = 3f;
+		Gizmo.Draw.LineThickness = 4.5f;
 
-		// 1. Draw Camera Body (clear, visible frustum)
-		float distance = 75f;
+		// 1. Draw Camera Body (clear, prominent, highly visible frustum)
+		float distance = 130f;
 		float fovRad = MathX.DegreeToRadian( peer.CameraFov > 0 ? peer.CameraFov : 80f );
 		float aspect = 16f / 9f;
 		float halfHeight = MathF.Tan( fovRad / 2f ) * distance;
@@ -172,22 +172,22 @@ public static class PresenceOverlay
 		Gizmo.Draw.Line( c3, c0 );
 
 		// Orientation line at the center
-		Gizmo.Draw.Line( pos, pos + forward * 25f );
+		Gizmo.Draw.Line( pos, pos + forward * 45f );
 
 		// 2. Draw 3D Billboard Nameplate above the camera (always facing the local viewer)
-		Vector3 textPos = pos + Vector3.Up * 32f;
+		Vector3 textPos = pos + Vector3.Up * 48f;
 		Vector3 toCam = Gizmo.Camera != null ? (Gizmo.Camera.Position - textPos) : -forward;
 		if ( toCam.LengthSquared < 0.01f ) toCam = -forward;
 		var billboardRot = Rotation.LookAt( toCam.Normal, Vector3.Up );
 
 		float dist = toCam.Length;
-		float textScale = Math.Clamp( dist / 180f, 1.0f, 3.5f );
+		float textScale = Math.Clamp( dist / 150f, 1.2f, 4.0f );
 		var textTransform = new Transform( textPos, billboardRot, textScale );
 
 		Gizmo.Draw.Color = color;
 		string label = string.IsNullOrEmpty( peer.PersonaName ) ? $"Peer {peer.PeerId.Substring( 0, 4 )}" : peer.PersonaName;
 		if ( peer.IsHost ) label += " ★ (Host)";
 
-		Gizmo.Draw.WorldText( label, textTransform, "Poppins", 26f, TextFlag.Center );
+		Gizmo.Draw.WorldText( label, textTransform, "Poppins", 32f, TextFlag.Center );
 	}
 }

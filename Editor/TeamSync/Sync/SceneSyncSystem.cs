@@ -16,6 +16,13 @@ public sealed class SceneSyncSystem
 		public Vector3 Position;
 		public Rotation Rotation;
 		public Vector3 Scale;
+		public bool IsStatic;
+		public List<string> Tags = new();
+		public NetworkMode NetworkMode;
+		public bool Networked;
+		public bool NetworkInterpolation;
+		public string PrefabSource;
+		public Dictionary<Guid, string> Components = new();
 	}
 
 	private readonly Dictionary<string, TrackedState> _trackedObjects = new();
@@ -43,6 +50,45 @@ public sealed class SceneSyncSystem
 		return false;
 	}
 
+	private static List<string> GetTagsList( GameObject go )
+	{
+		try
+		{
+			if ( go.Tags != null )
+			{
+				return go.Tags.TryGetAll()?.OrderBy( x => x ).ToList() ?? new List<string>();
+			}
+		}
+		catch { }
+		return new List<string>();
+	}
+
+	private static Dictionary<Guid, string> SnapshotComponents( GameObject go )
+	{
+		var dict = new Dictionary<Guid, string>();
+		if ( go == null || !go.IsValid() ) return dict;
+
+		try
+		{
+			foreach ( var comp in go.Components.GetAll() )
+			{
+				if ( comp == null || !comp.IsValid() ) continue;
+				try
+				{
+					var node = comp.Serialize();
+					if ( node != null )
+					{
+						dict[comp.Id] = node.ToJsonString();
+					}
+				}
+				catch { }
+			}
+		}
+		catch { }
+
+		return dict;
+	}
+
 	public void RegisterRemoteObject( GameObject go )
 	{
 		if ( go == null || !go.IsValid() || ShouldIgnore( go ) ) return;
@@ -54,8 +100,31 @@ public sealed class SceneSyncSystem
 			ParentId = go.Parent?.Id.ToString(),
 			Position = go.WorldPosition,
 			Rotation = go.WorldRotation,
-			Scale = go.WorldScale
+			Scale = go.WorldScale,
+			IsStatic = go.IsStatic,
+			Tags = GetTagsList( go ),
+			NetworkMode = go.NetworkMode,
+			Networked = go.Networked,
+			NetworkInterpolation = go.NetworkInterpolation,
+			PrefabSource = go.PrefabInstanceSource,
+			Components = SnapshotComponents( go )
 		};
+	}
+
+	public void RegisterRemoteComponent( string goId, Guid compId, string compJson )
+	{
+		if ( _trackedObjects.TryGetValue( goId, out var tracked ) )
+		{
+			tracked.Components[compId] = compJson;
+		}
+	}
+
+	public void UnregisterRemoteComponent( string goId, Guid compId )
+	{
+		if ( _trackedObjects.TryGetValue( goId, out var tracked ) )
+		{
+			tracked.Components.Remove( compId );
+		}
 	}
 
 	public void UnregisterRemoteObject( string id )
@@ -90,7 +159,14 @@ public sealed class SceneSyncSystem
 				ParentId = go.Parent?.Id.ToString(),
 				Position = go.WorldPosition,
 				Rotation = go.WorldRotation,
-				Scale = go.WorldScale
+				Scale = go.WorldScale,
+				IsStatic = go.IsStatic,
+				Tags = GetTagsList( go ),
+				NetworkMode = go.NetworkMode,
+				Networked = go.Networked,
+				NetworkInterpolation = go.NetworkInterpolation,
+				PrefabSource = go.PrefabInstanceSource,
+				Components = SnapshotComponents( go )
 			};
 		}
 	}
@@ -125,7 +201,14 @@ public sealed class SceneSyncSystem
 					ParentId = go.Parent?.Id.ToString(),
 					Position = go.WorldPosition,
 					Rotation = go.WorldRotation,
-					Scale = go.WorldScale
+					Scale = go.WorldScale,
+					IsStatic = go.IsStatic,
+					Tags = GetTagsList( go ),
+					NetworkMode = go.NetworkMode,
+					Networked = go.Networked,
+					NetworkInterpolation = go.NetworkInterpolation,
+					PrefabSource = go.PrefabInstanceSource,
+					Components = SnapshotComponents( go )
 				};
 				_trackedObjects[id] = tracked;
 
@@ -138,12 +221,42 @@ public sealed class SceneSyncSystem
 					Enabled = tracked.Enabled,
 					Position = tracked.Position,
 					Rotation = tracked.Rotation,
-					Scale = tracked.Scale
+					Scale = tracked.Scale,
+					IsStatic = tracked.IsStatic,
+					Tags = tracked.Tags,
+					NetworkMode = (int)tracked.NetworkMode,
+					Networked = tracked.Networked,
+					NetworkInterpolation = tracked.NetworkInterpolation,
+					PrefabSource = tracked.PrefabSource
 				} );
+
+				// If it already has components (e.g. spawned model renderer, collider, or prefab components)
+				foreach ( var comp in go.Components.GetAll() )
+				{
+					if ( comp == null || !comp.IsValid() ) continue;
+					string json = null;
+					try
+					{
+						json = comp.Serialize()?.ToJsonString();
+					}
+					catch { }
+
+					if ( json != null )
+					{
+						_manager.BroadcastSceneDelta( new SceneDeltaPayload
+						{
+							DeltaType = SceneDeltaType.AddComponent,
+							TargetGameObjectId = id,
+							ComponentId = comp.Id.ToString(),
+							ComponentType = comp.GetType().FullName,
+							ComponentJson = json
+						} );
+					}
+				}
 			}
 			else
 			{
-				// Check for transform mutations (position, rotation, scale)
+				// 1. Check for transform mutations (position, rotation, scale)
 				if ( (tracked.Position - go.WorldPosition).LengthSquared > 0.0001f ||
 				     tracked.Rotation != go.WorldRotation ||
 				     (tracked.Scale - go.WorldScale).LengthSquared > 0.0001f )
@@ -162,7 +275,7 @@ public sealed class SceneSyncSystem
 					} );
 				}
 
-				// Check for parent changes
+				// 2. Check for parent changes
 				string currentParentId = go.Parent?.Id.ToString();
 				if ( tracked.ParentId != currentParentId )
 				{
@@ -175,7 +288,7 @@ public sealed class SceneSyncSystem
 					} );
 				}
 
-				// Check for enabled state changes
+				// 3. Check for enabled state changes
 				if ( tracked.Enabled != go.Enabled )
 				{
 					tracked.Enabled = go.Enabled;
@@ -187,7 +300,7 @@ public sealed class SceneSyncSystem
 					} );
 				}
 
-				// Check for name changes
+				// 4. Check for name changes
 				if ( tracked.Name != go.Name )
 				{
 					tracked.Name = go.Name;
@@ -196,6 +309,107 @@ public sealed class SceneSyncSystem
 						DeltaType = SceneDeltaType.SetName,
 						TargetGameObjectId = id,
 						Name = tracked.Name
+					} );
+				}
+
+				// 5. Check for IsStatic changes
+				if ( tracked.IsStatic != go.IsStatic )
+				{
+					tracked.IsStatic = go.IsStatic;
+					_manager.BroadcastSceneDelta( new SceneDeltaPayload
+					{
+						DeltaType = SceneDeltaType.SetStatic,
+						TargetGameObjectId = id,
+						IsStatic = tracked.IsStatic
+					} );
+				}
+
+				// 6. Check for Tags changes
+				var currentTags = GetTagsList( go );
+				if ( !currentTags.SequenceEqual( tracked.Tags ) )
+				{
+					tracked.Tags = currentTags;
+					_manager.BroadcastSceneDelta( new SceneDeltaPayload
+					{
+						DeltaType = SceneDeltaType.SetTags,
+						TargetGameObjectId = id,
+						Tags = currentTags
+					} );
+				}
+
+				// 7. Check for NetworkMode / Networked / NetworkInterpolation changes
+				if ( tracked.NetworkMode != go.NetworkMode ||
+				     tracked.Networked != go.Networked ||
+				     tracked.NetworkInterpolation != go.NetworkInterpolation )
+				{
+					tracked.NetworkMode = go.NetworkMode;
+					tracked.Networked = go.Networked;
+					tracked.NetworkInterpolation = go.NetworkInterpolation;
+
+					_manager.BroadcastSceneDelta( new SceneDeltaPayload
+					{
+						DeltaType = SceneDeltaType.SetNetworkMode,
+						TargetGameObjectId = id,
+						NetworkMode = (int)tracked.NetworkMode,
+						Networked = tracked.Networked,
+						NetworkInterpolation = tracked.NetworkInterpolation
+					} );
+				}
+
+				// 8. Check for Component changes (Add, Update properties/variables, Remove)
+				var currentComps = go.Components.GetAll().Where( c => c != null && c.IsValid() ).ToList();
+				var currentCompGuids = new HashSet<Guid>();
+
+				foreach ( var comp in currentComps )
+				{
+					currentCompGuids.Add( comp.Id );
+					string json = null;
+					try
+					{
+						json = comp.Serialize()?.ToJsonString();
+					}
+					catch { }
+
+					if ( json == null ) continue;
+
+					if ( !tracked.Components.TryGetValue( comp.Id, out var prevJson ) )
+					{
+						// New component added locally
+						tracked.Components[comp.Id] = json;
+						_manager.BroadcastSceneDelta( new SceneDeltaPayload
+						{
+							DeltaType = SceneDeltaType.AddComponent,
+							TargetGameObjectId = id,
+							ComponentId = comp.Id.ToString(),
+							ComponentType = comp.GetType().FullName,
+							ComponentJson = json
+						} );
+					}
+					else if ( prevJson != json )
+					{
+						// Component variables/properties updated locally
+						tracked.Components[comp.Id] = json;
+						_manager.BroadcastSceneDelta( new SceneDeltaPayload
+						{
+							DeltaType = SceneDeltaType.UpdateComponent,
+							TargetGameObjectId = id,
+							ComponentId = comp.Id.ToString(),
+							ComponentType = comp.GetType().FullName,
+							ComponentJson = json
+						} );
+					}
+				}
+
+				// Check for removed components
+				var removedGuids = tracked.Components.Keys.Where( g => !currentCompGuids.Contains( g ) ).ToList();
+				foreach ( var guid in removedGuids )
+				{
+					tracked.Components.Remove( guid );
+					_manager.BroadcastSceneDelta( new SceneDeltaPayload
+					{
+						DeltaType = SceneDeltaType.RemoveComponent,
+						TargetGameObjectId = id,
+						ComponentId = guid.ToString()
 					} );
 				}
 			}

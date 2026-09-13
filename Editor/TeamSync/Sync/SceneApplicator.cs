@@ -52,8 +52,24 @@ public static class SceneApplicator
 					ApplySetName( session.Scene, delta );
 					break;
 
+				case SceneDeltaType.SetStatic:
+					ApplySetStatic( session.Scene, delta );
+					break;
+
+				case SceneDeltaType.SetTags:
+					ApplySetTags( session.Scene, delta );
+					break;
+
+				case SceneDeltaType.SetNetworkMode:
+					ApplySetNetworkMode( session.Scene, delta );
+					break;
+
 				case SceneDeltaType.AddComponent:
 					ApplyAddComponent( session.Scene, delta );
+					break;
+
+				case SceneDeltaType.UpdateComponent:
+					ApplyUpdateComponent( session.Scene, delta );
 					break;
 
 				case SceneDeltaType.RemoveComponent:
@@ -127,6 +143,44 @@ public static class SceneApplicator
 		go.WorldPosition = delta.Position;
 		go.WorldRotation = delta.Rotation;
 		go.WorldScale = delta.Scale;
+
+		if ( delta.IsStatic.HasValue )
+		{
+			go.IsStatic = delta.IsStatic.Value;
+		}
+
+		if ( delta.Tags != null )
+		{
+			go.Tags.RemoveAll();
+			foreach ( var tag in delta.Tags )
+			{
+				if ( !string.IsNullOrWhiteSpace( tag ) )
+					go.Tags.Add( tag );
+			}
+		}
+
+		if ( delta.NetworkMode.HasValue )
+		{
+			go.NetworkMode = (NetworkMode)delta.NetworkMode.Value;
+		}
+		if ( delta.Networked.HasValue )
+		{
+			go.Networked = delta.Networked.Value;
+		}
+		if ( delta.NetworkInterpolation.HasValue )
+		{
+			go.NetworkInterpolation = delta.NetworkInterpolation.Value;
+		}
+
+		if ( !string.IsNullOrEmpty( delta.PrefabSource ) )
+		{
+			try
+			{
+				go.SetPrefabSource( delta.PrefabSource );
+				go.UpdateFromPrefab();
+			}
+			catch { }
+		}
 
 		if ( !string.IsNullOrEmpty( delta.TargetGameObjectId ) )
 		{
@@ -205,15 +259,132 @@ public static class SceneApplicator
 		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
 	}
 
+	private static void ApplySetStatic( Scene scene, SceneDeltaPayload delta )
+	{
+		var go = FindGameObject( scene, delta.TargetGameObjectId );
+		if ( go == null || !go.IsValid() || !delta.IsStatic.HasValue ) return;
+
+		go.IsStatic = delta.IsStatic.Value;
+		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
+	}
+
+	private static void ApplySetTags( Scene scene, SceneDeltaPayload delta )
+	{
+		var go = FindGameObject( scene, delta.TargetGameObjectId );
+		if ( go == null || !go.IsValid() ) return;
+
+		go.Tags.RemoveAll();
+		if ( delta.Tags != null )
+		{
+			foreach ( var tag in delta.Tags )
+			{
+				if ( !string.IsNullOrWhiteSpace( tag ) )
+					go.Tags.Add( tag );
+			}
+		}
+		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
+	}
+
+	private static void ApplySetNetworkMode( Scene scene, SceneDeltaPayload delta )
+	{
+		var go = FindGameObject( scene, delta.TargetGameObjectId );
+		if ( go == null || !go.IsValid() ) return;
+
+		if ( delta.NetworkMode.HasValue )
+		{
+			go.NetworkMode = (NetworkMode)delta.NetworkMode.Value;
+		}
+		if ( delta.Networked.HasValue )
+		{
+			go.Networked = delta.Networked.Value;
+		}
+		if ( delta.NetworkInterpolation.HasValue )
+		{
+			go.NetworkInterpolation = delta.NetworkInterpolation.Value;
+		}
+		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
+	}
+
 	private static void ApplyAddComponent( Scene scene, SceneDeltaPayload delta )
 	{
 		var go = FindGameObject( scene, delta.TargetGameObjectId );
 		if ( go == null || !go.IsValid() || string.IsNullOrEmpty( delta.ComponentType ) ) return;
 
+		Guid compGuid = Guid.Empty;
+		if ( !string.IsNullOrEmpty( delta.ComponentId ) )
+		{
+			Guid.TryParse( delta.ComponentId, out compGuid );
+		}
+
+		// If already exists with this Id, update it
+		if ( compGuid != Guid.Empty )
+		{
+			var existing = go.Components.GetAll().FirstOrDefault( c => c.Id == compGuid );
+			if ( existing != null && existing.IsValid() )
+			{
+				ApplyUpdateComponent( scene, delta );
+				return;
+			}
+		}
+
 		var typeDesc = TypeLibrary.GetType( delta.ComponentType );
 		if ( typeDesc != null && typeof( Component ).IsAssignableFrom( typeDesc.TargetType ) )
 		{
-			go.Components.Create( typeDesc );
+			var comp = go.Components.Create( typeDesc );
+			if ( comp != null && comp.IsValid() )
+			{
+				if ( !string.IsNullOrEmpty( delta.ComponentJson ) )
+				{
+					try
+					{
+						var node = System.Text.Json.Nodes.JsonNode.Parse( delta.ComponentJson ) as System.Text.Json.Nodes.JsonObject;
+						if ( node != null )
+						{
+							comp.Deserialize( node );
+						}
+					}
+					catch { }
+				}
+
+				TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteComponent( delta.TargetGameObjectId, comp.Id, delta.ComponentJson );
+			}
+		}
+	}
+
+	private static void ApplyUpdateComponent( Scene scene, SceneDeltaPayload delta )
+	{
+		var go = FindGameObject( scene, delta.TargetGameObjectId );
+		if ( go == null || !go.IsValid() ) return;
+
+		Component comp = null;
+		if ( Guid.TryParse( delta.ComponentId, out var compGuid ) )
+		{
+			comp = go.Components.GetAll().FirstOrDefault( c => c.Id == compGuid );
+		}
+		else if ( !string.IsNullOrEmpty( delta.ComponentType ) )
+		{
+			comp = go.Components.GetAll().FirstOrDefault( c => c.GetType().FullName.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) ||
+			                                                   c.GetType().Name.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) );
+		}
+
+		if ( comp == null || !comp.IsValid() )
+		{
+			ApplyAddComponent( scene, delta );
+			return;
+		}
+
+		if ( !string.IsNullOrEmpty( delta.ComponentJson ) )
+		{
+			try
+			{
+				var node = System.Text.Json.Nodes.JsonNode.Parse( delta.ComponentJson ) as System.Text.Json.Nodes.JsonObject;
+				if ( node != null )
+				{
+					comp.Deserialize( node );
+					TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteComponent( delta.TargetGameObjectId, comp.Id, delta.ComponentJson );
+				}
+			}
+			catch { }
 		}
 	}
 
@@ -227,14 +398,17 @@ public static class SceneApplicator
 			var comp = go.Components.GetAll().FirstOrDefault( c => c.Id == compGuid );
 			if ( comp != null && comp.IsValid() )
 			{
+				TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteComponent( delta.TargetGameObjectId, compGuid );
 				comp.Destroy();
 			}
 		}
 		else if ( !string.IsNullOrEmpty( delta.ComponentType ) )
 		{
-			var comp = go.Components.GetAll().FirstOrDefault( c => c.GetType().Name.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) );
+			var comp = go.Components.GetAll().FirstOrDefault( c => c.GetType().FullName.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) ||
+			                                                   c.GetType().Name.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) );
 			if ( comp != null && comp.IsValid() )
 			{
+				TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteComponent( delta.TargetGameObjectId, comp.Id );
 				comp.Destroy();
 			}
 		}

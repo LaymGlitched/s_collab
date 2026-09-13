@@ -18,7 +18,8 @@ public enum TeamSyncMessageType
 	SceneDelta,        // Real-time scene graph change
 	SceneSnapshot,     // Full scene snapshot for catch-up
 	SceneSaveNotice,   // Notification that scene was saved to disk by host
-	HostMigration      // Notification that host migrated to a new peer
+	HostMigration,     // Notification that host migrated to a new peer
+	FileSync           // Live project file/asset synchronization
 }
 
 /// <summary>
@@ -138,7 +139,11 @@ public enum SceneDeltaType
 	SetParent,
 	SetEnabled,
 	SetName,
+	SetStatic,
+	SetTags,
+	SetNetworkMode,
 	AddComponent,
+	UpdateComponent,
 	RemoveComponent,
 	SetComponentProperty
 }
@@ -153,11 +158,26 @@ public sealed class SceneDeltaPayload
 	public Vector3 Position { get; set; }
 	public Rotation Rotation { get; set; }
 	public Vector3 Scale { get; set; } = Vector3.One;
+	public bool? IsStatic { get; set; }
+	public List<string> Tags { get; set; }
+	public int? NetworkMode { get; set; }
+	public bool? Networked { get; set; }
+	public bool? NetworkInterpolation { get; set; }
+	public string PrefabSource { get; set; }
 	public string ComponentId { get; set; }
 	public string ComponentType { get; set; }
+	public string ComponentJson { get; set; }
 	public string PropertyName { get; set; }
 	public string PropertyValueJson { get; set; }
 	public string SerializedGameObjectJson { get; set; }
+}
+
+public sealed class FileChunkPayload
+{
+	public string RelativePath { get; set; } = string.Empty;
+	public string Base64Data { get; set; } = string.Empty;
+	public string FileHash { get; set; } = string.Empty;
+	public bool IsDeleted { get; set; }
 }
 
 public sealed class SceneSnapshotPayload

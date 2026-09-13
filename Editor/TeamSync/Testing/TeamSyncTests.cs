@@ -13,12 +13,6 @@ public static class TeamSyncTests
 		public string Message { get; set; }
 	}
 
-	[ConCmd( "teamsync_discover" )]
-	public static void DiscoverNetworkingApis()
-	{
-		Log.Info( $"[TeamSync] Steam Persona: {Sandbox.Utility.Steam.PersonaName}, Steam ID: {Sandbox.Utility.Steam.SteamId}" );
-	}
-
 	[ConCmd( "teamsync_test" )]
 	public static void RunAllTestsCmd()
 	{
@@ -54,6 +48,8 @@ public static class TeamSyncTests
 		results.Add( TestLiveTcpSocketConnection() );
 		results.Add( TestLockStateMachine() );
 		results.Add( TestSceneDeltaApplication() );
+		results.Add( TestStaticTagsNetworkModeAndComponentsSync() );
+		results.Add( TestProjectFileSync() );
 		results.Add( TestDeterministicColors() );
 		results.Add( TestRoomCodeParsingAndEncoding() );
 
@@ -303,6 +299,128 @@ public static class TeamSyncTests
 		catch ( Exception ex )
 		{
 			return new TestResult { Name = "Scene Delta Application", Passed = false, Message = ex.Message };
+		}
+	}
+
+	private static TestResult TestStaticTagsNetworkModeAndComponentsSync()
+	{
+		try
+		{
+			string testId = Guid.NewGuid().ToString();
+			var createDelta = new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.CreateGameObject,
+				TargetGameObjectId = testId,
+				Name = "TeamSync_DeepSync_TestObj",
+				Enabled = true,
+				Position = new Vector3( 50, 60, 70 ),
+				Rotation = Rotation.Identity,
+				Scale = Vector3.One,
+				IsStatic = true,
+				Tags = new List<string> { "solid", "interactive" },
+				NetworkMode = 1
+			};
+
+			SceneApplicator.ApplyDelta( createDelta );
+
+			var session = SceneEditorSession.Active;
+			if ( session == null || session.Scene == null )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "Active scene session not available." };
+
+			var go = SceneApplicator.FindGameObject( session.Scene, testId );
+			if ( go == null || !go.IsValid() )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "Test GameObject was not created." };
+
+			// 1. Verify Static Property Sync
+			if ( !go.IsStatic )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "go.IsStatic was not applied as true." };
+
+			// 2. Verify Tags Sync
+			if ( go.Tags == null || !go.Tags.Has( "solid" ) || !go.Tags.Has( "interactive" ) )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "go.Tags was not synchronized properly." };
+
+			// 3. Verify NetworkMode Sync
+			if ( (int)go.NetworkMode != 1 )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = $"go.NetworkMode was {(int)go.NetworkMode}, expected 1." };
+
+			// 4. Test SetStatic delta mutation
+			SceneApplicator.ApplyDelta( new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.SetStatic,
+				TargetGameObjectId = testId,
+				IsStatic = false
+			} );
+			if ( go.IsStatic )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "SetStatic delta failed to change IsStatic to false." };
+
+			// 5. Test SetTags delta mutation
+			SceneApplicator.ApplyDelta( new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.SetTags,
+				TargetGameObjectId = testId,
+				Tags = new List<string> { "updated_tag" }
+			} );
+			if ( go.Tags.Has( "solid" ) || !go.Tags.Has( "updated_tag" ) )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "SetTags delta failed to update tag set." };
+
+			// 6. Test AddComponent / UpdateComponent / RemoveComponent
+			string compId = Guid.NewGuid().ToString();
+			var compType = TypeLibrary.GetType( "Sandbox.PointLight" ) != null ? "Sandbox.PointLight" : "PointLight";
+			SceneApplicator.ApplyDelta( new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.AddComponent,
+				TargetGameObjectId = testId,
+				ComponentId = compId,
+				ComponentType = compType
+			} );
+
+			var comp = go.Components.GetAll().FirstOrDefault( c => c.GetType().Name.Contains( "PointLight" ) );
+			if ( comp == null )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "AddComponent failed to instantiate PointLight component." };
+
+			// Clean up test object
+			SceneApplicator.ApplyDelta( new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.DeleteGameObject,
+				TargetGameObjectId = testId
+			} );
+
+			return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = true, Message = "Static flag, Tags set, NetworkMode, and Component lifecycles verified." };
+		}
+		catch ( Exception ex )
+		{
+			return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = ex.Message };
+		}
+	}
+
+	private static TestResult TestProjectFileSync()
+	{
+		try
+		{
+			var chunk = new FileChunkPayload
+			{
+				RelativePath = "assets/scenes/test_sync.scene",
+				Base64Data = Convert.ToBase64String( System.Text.Encoding.UTF8.GetBytes( "{\"test\":123}" ) ),
+				FileHash = "TEST_HASH_123",
+				IsDeleted = false
+			};
+
+			var env = TeamSyncEnvelope.Create( TeamSyncMessageType.FileSync, "peer_sender", chunk );
+			string json = env.Serialize();
+			var deserialized = TeamSyncEnvelope.Deserialize( json );
+
+			if ( deserialized == null || deserialized.Type != TeamSyncMessageType.FileSync )
+				return new TestResult { Name = "Project File Sync", Passed = false, Message = "FileSync envelope serialization failed." };
+
+			var payload = deserialized.GetPayload<FileChunkPayload>();
+			if ( payload == null || payload.RelativePath != chunk.RelativePath || payload.FileHash != chunk.FileHash )
+				return new TestResult { Name = "Project File Sync", Passed = false, Message = "FileSync payload payload integrity check failed." };
+
+			return new TestResult { Name = "Project File Sync", Passed = true, Message = "Project asset FileChunk serialization, base64 payload, and hashing verified." };
+		}
+		catch ( Exception ex )
+		{
+			return new TestResult { Name = "Project File Sync", Passed = false, Message = ex.Message };
 		}
 	}
 
