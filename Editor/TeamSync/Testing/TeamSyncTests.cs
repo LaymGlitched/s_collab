@@ -69,12 +69,71 @@ public static class TeamSyncTests
 
 		results.Add( TestMessageSerialization() );
 		results.Add( TestLoopbackTransport() );
+		results.Add( TestLiveTcpSocketConnection() );
 		results.Add( TestLockStateMachine() );
 		results.Add( TestSceneDeltaApplication() );
 		results.Add( TestDeterministicColors() );
 		results.Add( TestRoomCodeParsingAndEncoding() );
 
 		return results;
+	}
+
+	private static TestResult TestLiveTcpSocketConnection()
+	{
+		TeamSyncServer server = null;
+		TeamSyncClient client = null;
+
+		try
+		{
+			server = new TeamSyncServer( "test_host", 29035 );
+			server.StartAsync().Wait();
+
+			if ( !server.IsRunning )
+				return new TestResult { Name = "Live TCP Sockets", Passed = false, Message = $"Server failed to start: {server.StatusText}" };
+
+			client = new TeamSyncClient( "test_client", "127.0.0.1", server.Port );
+			client.StartAsync().Wait();
+
+			if ( !client.IsRunning )
+				return new TestResult { Name = "Live TCP Sockets", Passed = false, Message = $"Client failed to connect to 127.0.0.1:{server.Port}: {client.StatusText}" };
+
+			TeamSyncEnvelope receivedOnServer = null;
+			server.OnMessageReceived += env => receivedOnServer = env;
+
+			var hello = TeamSyncEnvelope.Create( TeamSyncMessageType.Hello, "test_client", new HelloPayload
+			{
+				PeerId = "test_client",
+				PersonaName = "AliceTester",
+				SteamId = 98765
+			} );
+
+			client.SendAsync( hello ).Wait();
+
+			// Wait up to 1000ms for loopback delivery
+			int waitMs = 0;
+			while ( receivedOnServer == null && waitMs < 1000 )
+			{
+				Thread.Sleep( 50 );
+				waitMs += 50;
+			}
+
+			if ( receivedOnServer == null )
+				return new TestResult { Name = "Live TCP Sockets", Passed = false, Message = "Server did not receive Hello envelope from client over live TCP socket." };
+
+			if ( receivedOnServer.SenderId != "test_client" )
+				return new TestResult { Name = "Live TCP Sockets", Passed = false, Message = $"Envelope received with wrong sender: {receivedOnServer.SenderId}" };
+
+			return new TestResult { Name = "Live TCP Sockets", Passed = true, Message = $"Live TCP WebSocket handshake, frame delivery, and envelope routing verified on port {server.Port}." };
+		}
+		catch ( Exception ex )
+		{
+			return new TestResult { Name = "Live TCP Sockets", Passed = false, Message = ex.ToString() };
+		}
+		finally
+		{
+			try { client?.StopAsync().Wait(); } catch { }
+			try { server?.StopAsync().Wait(); } catch { }
+		}
 	}
 
 	private static TestResult TestRoomCodeParsingAndEncoding()

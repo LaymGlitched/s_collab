@@ -141,6 +141,7 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 			try
 			{
 				var tcpClient = await _tcpListener.AcceptTcpClientAsync( ct );
+				Log.Info( $"[TeamSync] 🔔 Inbound connection received from {tcpClient.Client.RemoteEndPoint}!" );
 				_ = Task.Run( () => HandleClientConnectionAsync( tcpClient, ct ) );
 			}
 			catch ( OperationCanceledException )

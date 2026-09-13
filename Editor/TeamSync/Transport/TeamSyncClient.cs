@@ -45,11 +45,12 @@ public sealed class TeamSyncClient : ITeamSyncTransport
 		string uriString = $"ws://{HostAddress}:{Port}/teamsync/";
 		StatusText = $"Connecting to {HostAddress}:{Port}...";
 		OnStatusChanged?.Invoke( StatusText );
+		Log.Info( $"[TeamSync] 🚀 Client dialing: {uriString}" );
 
 		try
 		{
 			var uri = new Uri( uriString );
-			using var timeoutCts = new CancellationTokenSource( TimeSpan.FromSeconds( 10 ) );
+			using var timeoutCts = new CancellationTokenSource( TimeSpan.FromSeconds( 8 ) );
 			using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource( _cts.Token, timeoutCts.Token );
 
 			await _ws.ConnectAsync( uri, linkedCts.Token );
@@ -58,11 +59,13 @@ public sealed class TeamSyncClient : ITeamSyncTransport
 			StatusText = $"Connected to {HostAddress}:{Port}";
 			OnStatusChanged?.Invoke( StatusText );
 			OnPeerConnected?.Invoke( "Host" );
+			Log.Info( $"[TeamSync] 🎉 Client successfully connected to {HostAddress}:{Port}!" );
 
 			_ = Task.Run( () => ReceiveLoopAsync( _cts.Token ) );
 		}
 		catch ( Exception ex )
 		{
+			Log.Error( $"[TeamSync] ❌ Client connection failed to {uriString}: {ex.Message}" );
 			StatusText = $"Failed to connect: {ex.Message}";
 			OnStatusChanged?.Invoke( StatusText );
 			OnError?.Invoke( StatusText );
