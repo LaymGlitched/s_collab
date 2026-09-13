@@ -205,19 +205,19 @@ public sealed class TeamSyncDock : Widget
 		hostControls.Spacing = 6;
 		hostControls.Add( new Label( "Port:" ) );
 
-		_hostPortInput = new LineEdit( "29015" );
+		_hostPortInput = new LineEdit( "29020" );
 		_hostPortInput.FixedWidth = 65;
 		hostControls.Add( _hostPortInput );
 
 		var hostButton = new Button.Primary( "Start Hosting", "sensors" );
 		hostButton.Clicked = () =>
 		{
-			int port = int.TryParse( _hostPortInput.Text, out var p ) ? p : 29015;
+			int port = int.TryParse( _hostPortInput.Text, out var p ) ? p : 29020;
 			_ = TeamSyncManager.Instance.HostSessionAsync( port );
 		};
 		hostControls.Add( hostButton, 1 );
 
-		var hostHelp = hostGroup.Add( new Label( "Tip: For internet friends, port 29015 must be forwarded on your router (or both connect via Tailscale/ZeroTier)." ) );
+		var hostHelp = hostGroup.Add( new Label( "Tip: For internet friends, port 29020 must be reachable (router forwarded or via Tailscale/ZeroTier)." ) );
 		hostHelp.Color = Theme.Text.WithAlpha( 0.5f );
 
 		_content.AddSeparator();

@@ -21,14 +21,14 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 	public bool IsRunning { get; private set; }
 	public bool IsHost => true;
 	public string LocalPeerId { get; private set; }
-	public int Port { get; }
+	public int Port { get; private set; }
 	public string StatusText { get; private set; } = "Stopped";
 
 	private TcpListener _tcpListener;
 	private CancellationTokenSource _cts;
 	private readonly ConcurrentDictionary<string, NetWebSocket> _clients = new();
 
-	public TeamSyncServer( string localPeerId, int port = 29015 )
+	public TeamSyncServer( string localPeerId, int port = 29020 )
 	{
 		LocalPeerId = localPeerId;
 		Port = port;
@@ -40,27 +40,63 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 
 		_cts = new CancellationTokenSource();
 
-		try
-		{
-			// Bind to all network interfaces (LAN, WAN, localhost, virtual adapters)
-			_tcpListener = new TcpListener( IPAddress.Any, Port );
-			_tcpListener.Server.SetSocketOption( SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true );
-			_tcpListener.Start();
+		int requestedPort = Port > 0 ? Port : 29020;
+		// 29015 is often reserved by Windows Hyper-V; prefer 29020+
+		var candidates = new List<int> { requestedPort, 29020, 29021, 29022, 29025, 29030 };
+		bool bound = false;
 
-			IsRunning = true;
-			StatusText = $"Hosting on port {Port} (All Interfaces)";
-			OnStatusChanged?.Invoke( StatusText );
-			Log.Info( $"[TeamSync] Server started listening on 0.0.0.0:{Port}." );
-
-			_ = Task.Run( () => ListenLoopAsync( _cts.Token ) );
-		}
-		catch ( Exception ex )
+		foreach ( int candidate in candidates.Distinct() )
 		{
-			StatusText = $"Failed to bind port {Port}: {ex.Message}";
-			OnStatusChanged?.Invoke( StatusText );
-			OnError?.Invoke( StatusText );
-			Log.Error( $"[TeamSync] Server bind error: {ex.Message}" );
+			try
+			{
+				_tcpListener = new TcpListener( IPAddress.Any, candidate );
+				_tcpListener.ExclusiveAddressUse = false;
+				_tcpListener.Server.SetSocketOption( SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true );
+				_tcpListener.Start();
+
+				Port = candidate;
+				bound = true;
+				break;
+			}
+			catch ( SocketException ex ) when ( ex.SocketErrorCode == SocketError.AccessDenied || ex.SocketErrorCode == SocketError.AddressAlreadyInUse )
+			{
+				try { _tcpListener?.Stop(); } catch { }
+				_tcpListener = null;
+				Log.Warning( $"[TeamSync] Port {candidate} is reserved by Windows or in use. Trying next available port..." );
+			}
+			catch ( Exception )
+			{
+				try { _tcpListener?.Stop(); } catch { }
+				_tcpListener = null;
+			}
 		}
+
+		if ( !bound )
+		{
+			// Final fallback: let OS assign any free ephemeral port
+			try
+			{
+				_tcpListener = new TcpListener( IPAddress.Any, 0 );
+				_tcpListener.Start();
+				Port = ((IPEndPoint)_tcpListener.LocalEndpoint).Port;
+				bound = true;
+			}
+			catch ( Exception ex )
+			{
+				StatusText = $"Failed to bind port: {ex.Message}";
+				OnStatusChanged?.Invoke( StatusText );
+				OnError?.Invoke( StatusText );
+				Log.Error( $"[TeamSync] Server bind error: {ex.Message}" );
+				return;
+			}
+		}
+
+		IsRunning = true;
+		StatusText = $"Hosting on port {Port} (All Interfaces)";
+		OnStatusChanged?.Invoke( StatusText );
+		Log.Info( $"[TeamSync] Server successfully listening on 0.0.0.0:{Port}." );
+
+		_ = Task.Run( () => ListenLoopAsync( _cts.Token ) );
 	}
 
 	public async Task StopAsync()

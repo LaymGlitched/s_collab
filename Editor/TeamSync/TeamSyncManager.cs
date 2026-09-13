@@ -55,7 +55,7 @@ public sealed class TeamSyncManager
 		}
 	}
 
-	public async Task HostSessionAsync( int port = 29015 )
+	public async Task HostSessionAsync( int port = 29020 )
 	{
 		await LeaveSessionAsync();
 
@@ -63,6 +63,8 @@ public sealed class TeamSyncManager
 		AttachTransport( server );
 
 		await server.StartAsync();
+
+		int actualPort = server.Port;
 
 		// Register self as host collaborator
 		var self = new CollaboratorState( LocalPeerId, LocalPersonaName, LocalSteamId, LocalColor.Hex )
@@ -73,12 +75,12 @@ public sealed class TeamSyncManager
 
 		SyncSystem.Reset();
 
-		// Broadcast session presence on LAN
+		// Broadcast session presence on LAN using actual bound port
 		LanDiscoveryService.Instance.StopListening();
-		LanDiscoveryService.Instance.StartBroadcasting( port, Project.Current?.Config?.Title ?? "s_collab", LocalPersonaName, LocalSteamId, () => Collaborators.Count );
+		LanDiscoveryService.Instance.StartBroadcasting( actualPort, Project.Current?.Config?.Title ?? "s_collab", LocalPersonaName, LocalSteamId, () => Collaborators.Count );
 
 		// Attempt automatic UPnP router port forwarding in background
-		_ = UpnpHelper.TryForwardPortAsync( port );
+		_ = UpnpHelper.TryForwardPortAsync( actualPort );
 
 		OnSessionStateChanged?.Invoke();
 	}
