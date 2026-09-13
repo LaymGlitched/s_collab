@@ -207,12 +207,8 @@ public sealed class TeamSyncManager
 		Transport = transport;
 		Transport.OnMessageReceived += msg =>
 		{
+			// Always queue messages to be processed on the main editor thread
 			_inboundQueue.Enqueue( msg );
-			// Immediately process connection and handshake envelopes
-			if ( msg.Type == TeamSyncMessageType.Hello || msg.Type == TeamSyncMessageType.Welcome || msg.Type == TeamSyncMessageType.PeerJoined )
-			{
-				ProcessEnvelope( msg );
-			}
 		};
 		Transport.OnPeerDisconnected += peerId =>
 		{

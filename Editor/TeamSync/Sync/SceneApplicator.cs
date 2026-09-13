@@ -101,6 +101,11 @@ public static class SceneApplicator
 
 	private static void ApplyCreateGameObject( Scene scene, SceneDeltaPayload delta )
 	{
+		if ( delta.Name != null && (delta.Name.Equals( "editor_camera", StringComparison.OrdinalIgnoreCase ) || delta.Name.StartsWith( "editor_", StringComparison.OrdinalIgnoreCase )) )
+		{
+			return; // Never replicate internal editor cameras
+		}
+
 		var existing = FindGameObject( scene, delta.TargetGameObjectId );
 		if ( existing != null && existing.IsValid() ) return; // Already exists
 
@@ -127,13 +132,18 @@ public static class SceneApplicator
 		{
 			_remoteToLocalMap[delta.TargetGameObjectId] = go;
 		}
+
+		// Register in SceneSyncSystem so local change detection does NOT echo it back
+		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
 	}
 
 	private static void ApplyDeleteGameObject( Scene scene, SceneDeltaPayload delta )
 	{
+		TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteObject( delta.TargetGameObjectId );
 		var go = FindGameObject( scene, delta.TargetGameObjectId );
 		if ( go != null && go.IsValid() )
 		{
+			TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteObject( go.Id.ToString() );
 			if ( !string.IsNullOrEmpty( delta.TargetGameObjectId ) )
 			{
 				_remoteToLocalMap.Remove( delta.TargetGameObjectId );
@@ -150,6 +160,8 @@ public static class SceneApplicator
 		go.WorldPosition = delta.Position;
 		go.WorldRotation = delta.Rotation;
 		go.WorldScale = delta.Scale;
+
+		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
 	}
 
 	private static void ApplySetParent( Scene scene, SceneDeltaPayload delta )
@@ -169,6 +181,8 @@ public static class SceneApplicator
 				go.SetParent( parent );
 			}
 		}
+
+		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
 	}
 
 	private static void ApplySetEnabled( Scene scene, SceneDeltaPayload delta )
@@ -177,6 +191,8 @@ public static class SceneApplicator
 		if ( go == null || !go.IsValid() ) return;
 
 		go.Enabled = delta.Enabled;
+
+		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
 	}
 
 	private static void ApplySetName( Scene scene, SceneDeltaPayload delta )
@@ -185,6 +201,8 @@ public static class SceneApplicator
 		if ( go == null || !go.IsValid() ) return;
 
 		go.Name = delta.Name;
+
+		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
 	}
 
 	private static void ApplyAddComponent( Scene scene, SceneDeltaPayload delta )
@@ -261,7 +279,24 @@ public static class SceneApplicator
 
 		try
 		{
-			return session.Scene.Serialize().ToJsonString();
+			var jobj = session.Scene.Serialize();
+			if ( jobj != null && jobj.TryGetPropertyValue( "Objects", out var objectsNode ) && objectsNode is System.Text.Json.Nodes.JsonArray arr )
+			{
+				for ( int i = arr.Count - 1; i >= 0; i-- )
+				{
+					if ( arr[i] is System.Text.Json.Nodes.JsonObject obj &&
+					     obj.TryGetPropertyValue( "Name", out var nameVal ) &&
+					     nameVal != null )
+					{
+						string n = nameVal.ToString();
+						if ( n.Equals( "editor_camera", StringComparison.OrdinalIgnoreCase ) || n.StartsWith( "editor_", StringComparison.OrdinalIgnoreCase ) )
+						{
+							arr.RemoveAt( i );
+						}
+					}
+				}
+			}
+			return jobj?.ToJsonString();
 		}
 		catch
 		{
@@ -288,6 +323,7 @@ public static class SceneApplicator
 			{
 				session.Scene.Deserialize( jobj );
 			}
+			TeamSyncManager.Instance?.SyncSystem?.RebuildBaseline();
 		}
 		catch ( Exception ex )
 		{

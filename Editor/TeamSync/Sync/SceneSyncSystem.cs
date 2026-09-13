@@ -25,6 +25,47 @@ public sealed class SceneSyncSystem
 		_manager = manager;
 	}
 
+	public static bool ShouldIgnore( GameObject go )
+	{
+		if ( go == null || !go.IsValid() ) return true;
+		if ( go.Flags.HasFlag( GameObjectFlags.Hidden ) ) return true;
+
+		var name = go.Name;
+		if ( string.IsNullOrEmpty( name ) ) return false;
+
+		// Ignore internal editor viewport cameras and editor helper objects
+		if ( name.Equals( "editor_camera", StringComparison.OrdinalIgnoreCase ) ||
+		     name.StartsWith( "editor_", StringComparison.OrdinalIgnoreCase ) )
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	public void RegisterRemoteObject( GameObject go )
+	{
+		if ( go == null || !go.IsValid() || ShouldIgnore( go ) ) return;
+		string id = go.Id.ToString();
+		_trackedObjects[id] = new TrackedState
+		{
+			Name = go.Name,
+			Enabled = go.Enabled,
+			ParentId = go.Parent?.Id.ToString(),
+			Position = go.WorldPosition,
+			Rotation = go.WorldRotation,
+			Scale = go.WorldScale
+		};
+	}
+
+	public void UnregisterRemoteObject( string id )
+	{
+		if ( !string.IsNullOrEmpty( id ) )
+		{
+			_trackedObjects.Remove( id );
+		}
+	}
+
 	public void Reset()
 	{
 		_trackedObjects.Clear();
@@ -39,7 +80,7 @@ public sealed class SceneSyncSystem
 
 		foreach ( var go in session.Scene.GetAllObjects( false ) )
 		{
-			if ( go == null || !go.IsValid() ) continue;
+			if ( ShouldIgnore( go ) ) continue;
 
 			string id = go.Id.ToString();
 			_trackedObjects[id] = new TrackedState
@@ -63,8 +104,10 @@ public sealed class SceneSyncSystem
 		var session = SceneEditorSession.Active;
 		if ( session == null || session.Scene == null ) return;
 
-		// Scan for changes
-		var currentSceneObjects = session.Scene.GetAllObjects( false ).Where( x => x.IsValid() ).ToList();
+		// Scan for changes - ignore editor_camera, hidden, or editor-internal objects
+		var currentSceneObjects = session.Scene.GetAllObjects( false )
+			.Where( x => !ShouldIgnore( x ) )
+			.ToList();
 		var currentIds = new HashSet<string>();
 
 		foreach ( var go in currentSceneObjects )
