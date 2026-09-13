@@ -16,12 +16,7 @@ public static class TeamSyncTests
 	[ConCmd( "teamsync_discover" )]
 	public static void DiscoverNetworkingApis()
 	{
-		Log.Info( "=================================================" );
-		Log.Info( "[TeamSync] Introspecting Sandbox.Utility.Steam..." );
-		Log.Info( "=================================================" );
-
-		Log.Info( $"[TeamSync] Steam.PersonaName = '{Sandbox.Utility.Steam.PersonaName}'" );
-		Log.Info( $"[TeamSync] Steam.SteamId = '{Sandbox.Utility.Steam.SteamId}'" );
+		Log.Info( $"[TeamSync] Steam Persona: {Sandbox.Utility.Steam.PersonaName}, Steam ID: {Sandbox.Utility.Steam.SteamId}" );
 	}
 
 	[ConCmd( "teamsync_test" )]
