@@ -202,13 +202,22 @@ public sealed class SelectionLockSystem
 		var session = SceneEditorSession.Active;
 		if ( session == null ) return;
 
-		var selected = session.Selection.OfType<GameObject>().ToList();
-		foreach ( var go in selected )
+		var items = session.Selection.ToList();
+		foreach ( var item in items )
 		{
-			string goId = go.Id.ToString();
-			if ( IsLockedByOther( goId, out _ ) )
+			GameObject go = null;
+			if ( item is GameObject g && g.IsValid() )
 			{
-				session.Selection.Remove( go );
+				go = g;
+			}
+			else if ( item is Component comp && comp.IsValid() && comp.GameObject != null && comp.GameObject.IsValid() )
+			{
+				go = comp.GameObject;
+			}
+
+			if ( go != null && IsLockedByOther( go.Id.ToString(), out _ ) )
+			{
+				session.Selection.Remove( item );
 			}
 		}
 	}
@@ -235,9 +244,7 @@ public sealed class SelectionLockSystem
 
 					if ( holderPeerId == _manager.LocalPeerId ) continue; // Local user knows their own selection
 
-					if ( !Guid.TryParse( goIdStr, out var goGuid ) ) continue;
-
-					var go = session.Scene.Directory.FindByGuid( goGuid );
+					var go = SceneApplicator.FindGameObject( session.Scene, goIdStr );
 					if ( go == null || !go.IsValid() ) continue;
 
 					if ( !_manager.Collaborators.TryGetValue( holderPeerId, out var peer ) ) continue;

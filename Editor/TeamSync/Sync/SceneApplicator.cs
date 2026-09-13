@@ -11,9 +11,13 @@ public static class SceneApplicator
 	// Maps remote GameObject ID string to local GameObject reference
 	private static readonly Dictionary<string, GameObject> _remoteToLocalMap = new();
 
+	// Maps remote Component ID string to local Component Guid
+	private static readonly Dictionary<string, Guid> _remoteToLocalComponentMap = new();
+
 	public static void ResetMapping()
 	{
 		_remoteToLocalMap.Clear();
+		_remoteToLocalComponentMap.Clear();
 	}
 
 	public static void ApplyDelta( SceneDeltaPayload delta )
@@ -316,15 +320,34 @@ public static class SceneApplicator
 			Guid.TryParse( delta.ComponentId, out compGuid );
 		}
 
-		// If already exists with this Id, update it
-		if ( compGuid != Guid.Empty )
+		// 1. Check if component already mapped
+		Component existing = null;
+		if ( !string.IsNullOrEmpty( delta.ComponentId ) && _remoteToLocalComponentMap.TryGetValue( delta.ComponentId, out var localCompGuid ) )
 		{
-			var existing = go.Components.GetAll().FirstOrDefault( c => c.Id == compGuid );
-			if ( existing != null && existing.IsValid() )
+			existing = go.Components.GetAll().FirstOrDefault( c => c.Id == localCompGuid );
+		}
+
+		// 2. Check if component exists with matching Guid
+		if ( existing == null && compGuid != Guid.Empty )
+		{
+			existing = go.Components.GetAll().FirstOrDefault( c => c.Id == compGuid );
+		}
+
+		// 3. Check if component exists with matching type
+		if ( existing == null && !string.IsNullOrEmpty( delta.ComponentType ) )
+		{
+			existing = go.Components.GetAll().FirstOrDefault( c => c.GetType().FullName.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) ||
+			                                                       c.GetType().Name.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) );
+		}
+
+		if ( existing != null && existing.IsValid() )
+		{
+			if ( !string.IsNullOrEmpty( delta.ComponentId ) )
 			{
-				ApplyUpdateComponent( scene, delta );
-				return;
+				_remoteToLocalComponentMap[delta.ComponentId] = existing.Id;
 			}
+			ApplyUpdateComponent( scene, delta );
+			return;
 		}
 
 		var typeDesc = TypeLibrary.GetType( delta.ComponentType );
@@ -333,6 +356,11 @@ public static class SceneApplicator
 			var comp = go.Components.Create( typeDesc );
 			if ( comp != null && comp.IsValid() )
 			{
+				if ( !string.IsNullOrEmpty( delta.ComponentId ) )
+				{
+					_remoteToLocalComponentMap[delta.ComponentId] = comp.Id;
+				}
+
 				if ( !string.IsNullOrEmpty( delta.ComponentJson ) )
 				{
 					try
@@ -340,7 +368,7 @@ public static class SceneApplicator
 						var node = System.Text.Json.Nodes.JsonNode.Parse( delta.ComponentJson ) as System.Text.Json.Nodes.JsonObject;
 						if ( node != null )
 						{
-							comp.Deserialize( node );
+							comp.DeserializeImmediately( node );
 						}
 					}
 					catch { }
@@ -357,11 +385,17 @@ public static class SceneApplicator
 		if ( go == null || !go.IsValid() ) return;
 
 		Component comp = null;
-		if ( Guid.TryParse( delta.ComponentId, out var compGuid ) )
+		if ( !string.IsNullOrEmpty( delta.ComponentId ) && _remoteToLocalComponentMap.TryGetValue( delta.ComponentId, out var localCompGuid ) )
+		{
+			comp = go.Components.GetAll().FirstOrDefault( c => c.Id == localCompGuid );
+		}
+
+		if ( comp == null && Guid.TryParse( delta.ComponentId, out var compGuid ) )
 		{
 			comp = go.Components.GetAll().FirstOrDefault( c => c.Id == compGuid );
 		}
-		else if ( !string.IsNullOrEmpty( delta.ComponentType ) )
+
+		if ( comp == null && !string.IsNullOrEmpty( delta.ComponentType ) )
 		{
 			comp = go.Components.GetAll().FirstOrDefault( c => c.GetType().FullName.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) ||
 			                                                   c.GetType().Name.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) );
@@ -373,6 +407,11 @@ public static class SceneApplicator
 			return;
 		}
 
+		if ( !string.IsNullOrEmpty( delta.ComponentId ) )
+		{
+			_remoteToLocalComponentMap[delta.ComponentId] = comp.Id;
+		}
+
 		if ( !string.IsNullOrEmpty( delta.ComponentJson ) )
 		{
 			try
@@ -380,7 +419,7 @@ public static class SceneApplicator
 				var node = System.Text.Json.Nodes.JsonNode.Parse( delta.ComponentJson ) as System.Text.Json.Nodes.JsonObject;
 				if ( node != null )
 				{
-					comp.Deserialize( node );
+					comp.DeserializeImmediately( node );
 					TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteComponent( delta.TargetGameObjectId, comp.Id, delta.ComponentJson );
 				}
 			}
@@ -393,24 +432,28 @@ public static class SceneApplicator
 		var go = FindGameObject( scene, delta.TargetGameObjectId );
 		if ( go == null || !go.IsValid() ) return;
 
-		if ( Guid.TryParse( delta.ComponentId, out var compGuid ) )
+		Component comp = null;
+		if ( !string.IsNullOrEmpty( delta.ComponentId ) && _remoteToLocalComponentMap.TryGetValue( delta.ComponentId, out var localCompGuid ) )
 		{
-			var comp = go.Components.GetAll().FirstOrDefault( c => c.Id == compGuid );
-			if ( comp != null && comp.IsValid() )
-			{
-				TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteComponent( delta.TargetGameObjectId, compGuid );
-				comp.Destroy();
-			}
+			comp = go.Components.GetAll().FirstOrDefault( c => c.Id == localCompGuid );
+			_remoteToLocalComponentMap.Remove( delta.ComponentId );
 		}
-		else if ( !string.IsNullOrEmpty( delta.ComponentType ) )
+
+		if ( comp == null && Guid.TryParse( delta.ComponentId, out var compGuid ) )
 		{
-			var comp = go.Components.GetAll().FirstOrDefault( c => c.GetType().FullName.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) ||
+			comp = go.Components.GetAll().FirstOrDefault( c => c.Id == compGuid );
+		}
+
+		if ( comp == null && !string.IsNullOrEmpty( delta.ComponentType ) )
+		{
+			comp = go.Components.GetAll().FirstOrDefault( c => c.GetType().FullName.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) ||
 			                                                   c.GetType().Name.Equals( delta.ComponentType, StringComparison.OrdinalIgnoreCase ) );
-			if ( comp != null && comp.IsValid() )
-			{
-				TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteComponent( delta.TargetGameObjectId, comp.Id );
-				comp.Destroy();
-			}
+		}
+
+		if ( comp != null && comp.IsValid() )
+		{
+			TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteComponent( delta.TargetGameObjectId, comp.Id );
+			comp.Destroy();
 		}
 	}
 

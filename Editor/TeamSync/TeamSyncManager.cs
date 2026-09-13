@@ -351,9 +351,9 @@ public sealed class TeamSyncManager
 
 		try
 		{
-			// 2. Track & broadcast local editor camera transform (~15Hz)
+			// 2. Track & broadcast local editor camera transform (~30Hz)
 			float now = RealTime.Now;
-			if ( now - _lastCamBroadcastTime > 0.06f )
+			if ( now - _lastCamBroadcastTime > 0.033f )
 			{
 				_lastCamBroadcastTime = now;
 				BroadcastLocalCamera();
@@ -449,7 +449,18 @@ public sealed class TeamSyncManager
 		var session = SceneEditorSession.Active;
 		if ( session == null ) return;
 
-		var currentSelected = session.Selection.OfType<GameObject>().Select( x => x.Id.ToString() ).ToHashSet();
+		var currentSelected = new HashSet<string>();
+		foreach ( var item in session.Selection )
+		{
+			if ( item is GameObject go && go.IsValid() )
+			{
+				currentSelected.Add( go.Id.ToString() );
+			}
+			else if ( item is Component comp && comp.IsValid() && comp.GameObject != null && comp.GameObject.IsValid() )
+			{
+				currentSelected.Add( comp.GameObject.Id.ToString() );
+			}
+		}
 
 		if ( !currentSelected.SetEquals( _lastLocalSelection ) )
 		{

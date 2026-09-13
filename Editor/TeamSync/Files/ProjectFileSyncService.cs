@@ -112,6 +112,8 @@ public sealed class ProjectFileSyncService
 			     lower.StartsWith( "bin" ) ||
 			     lower.StartsWith( "obj" ) ||
 			     lower.StartsWith( ".source" ) ||
+			     lower.EndsWith( ".scene" ) ||
+			     lower.EndsWith( ".scene_c" ) ||
 			     lower.EndsWith( ".tmp" ) ||
 			     lower.EndsWith( ".cache" ) ||
 			     lower.EndsWith( ".pdb" ) ||

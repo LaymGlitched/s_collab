@@ -13,6 +13,7 @@ public static class TeamSyncTests
 		public string Message { get; set; }
 	}
 
+
 	[ConCmd( "teamsync_test" )]
 	public static void RunAllTestsCmd()
 	{
@@ -377,6 +378,33 @@ public static class TeamSyncTests
 			var comp = go.Components.GetAll().FirstOrDefault( c => c.GetType().Name.Contains( "PointLight" ) );
 			if ( comp == null )
 				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "AddComponent failed to instantiate PointLight component." };
+
+			// 7. Test UpdateComponent property/variable synchronization
+			comp.Enabled = false;
+			var serFalse = comp.Serialize();
+			comp.Enabled = true;
+
+			SceneApplicator.ApplyDelta( new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.UpdateComponent,
+				TargetGameObjectId = testId,
+				ComponentId = compId,
+				ComponentType = compType,
+				ComponentJson = serFalse?.ToJsonString()
+			} );
+			if ( comp.Enabled != false )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = $"UpdateComponent failed to synchronize component Enabled variable/property. Enabled is {comp.Enabled}, ser was {serFalse?.ToJsonString()}" };
+
+			// 8. Test RemoveComponent
+			SceneApplicator.ApplyDelta( new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.RemoveComponent,
+				TargetGameObjectId = testId,
+				ComponentId = compId,
+				ComponentType = compType
+			} );
+			if ( go.Components.GetAll().Any( c => c.GetType().Name.Contains( "PointLight" ) ) )
+				return new TestResult { Name = "Static/Tags/Network/Component Sync", Passed = false, Message = "RemoveComponent failed to remove component." };
 
 			// Clean up test object
 			SceneApplicator.ApplyDelta( new SceneDeltaPayload

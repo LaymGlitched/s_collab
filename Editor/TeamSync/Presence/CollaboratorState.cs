@@ -14,10 +14,29 @@ public sealed class CollaboratorState
 	public Vector3 CameraPosition { get; set; }
 	public Angles CameraAngles { get; set; }
 	public float CameraFov { get; set; } = 80f;
+	public Vector3 DisplayPosition { get; set; }
+	public Angles DisplayAngles { get; set; }
+	private bool _hasInitialPosition;
 	public HashSet<string> SelectedObjectIds { get; } = new();
 	public DateTime LastSeen { get; set; } = DateTime.UtcNow;
 
 	public bool IsActive => (DateTime.UtcNow - LastSeen).TotalSeconds < 30;
+
+	public void UpdateInterpolation( float dt )
+	{
+		if ( !_hasInitialPosition )
+		{
+			DisplayPosition = CameraPosition;
+			DisplayAngles = CameraAngles;
+			_hasInitialPosition = true;
+			return;
+		}
+
+		// Frame-rate independent exponential lerp for butter-smooth camera movement
+		float factor = 1f - MathF.Exp( -22f * MathF.Max( dt, 0.001f ) );
+		DisplayPosition = Vector3.Lerp( DisplayPosition, CameraPosition, factor );
+		DisplayAngles = Angles.Lerp( DisplayAngles, CameraAngles, factor );
+	}
 
 	public CollaboratorState( string peerId, string personaName, ulong steamId, string colorHex = null )
 	{

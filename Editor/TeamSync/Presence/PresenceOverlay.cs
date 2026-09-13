@@ -52,12 +52,14 @@ public static class PresenceOverlay
 			}
 
 			var activePeerIds = new HashSet<string>();
+			float dt = RealTime.Delta;
 
 			// Update or spawn SceneModel visual markers for each remote collaborator
 			foreach ( var peer in manager.Collaborators.Values )
 			{
 				if ( peer.PeerId == manager.LocalPeerId ) continue; // Don't draw self
 
+				peer.UpdateInterpolation( dt );
 				activePeerIds.Add( peer.PeerId );
 				UpdatePeerMarker( session.Scene.SceneWorld, peer );
 			}
@@ -82,6 +84,9 @@ public static class PresenceOverlay
 	{
 		try
 		{
+			var renderPos = peer.DisplayPosition;
+			var renderRot = peer.DisplayAngles.ToRotation();
+
 			if ( !_markerModels.TryGetValue( peer.PeerId, out var model ) || model == null || !model.IsValid() )
 			{
 				var modelAsset = Model.Load( "models/editor/camera.vmdl" );
@@ -90,7 +95,7 @@ public static class PresenceOverlay
 					modelAsset = Model.Cube;
 				}
 
-				var transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation(), 2.75f );
+				var transform = new Transform( renderPos, renderRot, 2.75f );
 				
 				model = new SceneModel( sceneWorld, modelAsset, transform );
 				model.ColorTint = peer.Color;
@@ -99,7 +104,7 @@ public static class PresenceOverlay
 			}
 
 			// Sync transform & color
-			model.Transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation(), 2.75f );
+			model.Transform = new Transform( renderPos, renderRot, 2.75f );
 			if ( model.ColorTint != peer.Color )
 			{
 				model.ColorTint = peer.Color;
@@ -135,8 +140,8 @@ public static class PresenceOverlay
 
 	private static void DrawCollaboratorPresence( CollaboratorState peer )
 	{
-		var pos = peer.CameraPosition;
-		var rot = peer.CameraAngles.ToRotation();
+		var pos = peer.DisplayPosition;
+		var rot = peer.DisplayAngles.ToRotation();
 		var color = peer.Color;
 
 		Gizmo.Draw.Color = color;

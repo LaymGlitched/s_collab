@@ -256,6 +256,12 @@ public sealed class SceneSyncSystem
 			}
 			else
 			{
+				// If this object is locked by another collaborator, ignore local modifications
+				if ( _manager.LockSystem.IsLockedByOther( id, out _ ) )
+				{
+					continue;
+				}
+
 				// 1. Check for transform mutations (position, rotation, scale)
 				if ( (tracked.Position - go.WorldPosition).LengthSquared > 0.0001f ||
 				     tracked.Rotation != go.WorldRotation ||

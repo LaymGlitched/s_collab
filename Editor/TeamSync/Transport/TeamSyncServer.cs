@@ -24,9 +24,16 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 	public int Port { get; private set; }
 	public string StatusText { get; private set; } = "Stopped";
 
+	private sealed class ClientSession
+	{
+		public string PeerId { get; set; }
+		public NetWebSocket Socket { get; set; }
+		public SemaphoreSlim SendLock { get; } = new( 1, 1 );
+	}
+
 	private TcpListener _tcpListener;
 	private CancellationTokenSource _cts;
-	private readonly ConcurrentDictionary<string, NetWebSocket> _clients = new();
+	private readonly ConcurrentDictionary<string, ClientSession> _clients = new();
 
 	public TeamSyncServer( string localPeerId, int port = 29020 )
 	{
@@ -108,19 +115,20 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 
 		_cts?.Cancel();
 
-		foreach ( var kvp in _clients )
+		foreach ( var session in _clients.Values )
 		{
 			try
 			{
-				if ( kvp.Value.State == NetWebSocketState.Open )
+				if ( session.Socket.State == NetWebSocketState.Open )
 				{
-					await kvp.Value.CloseAsync( NetWebSocketCloseStatus.NormalClosure, "Host closed session", CancellationToken.None );
+					await session.Socket.CloseAsync( NetWebSocketCloseStatus.NormalClosure, "Host closed session", CancellationToken.None );
 				}
 			}
 			catch { }
 			try
 			{
-				kvp.Value.Dispose();
+				session.Socket.Dispose();
+				session.SendLock.Dispose();
 			}
 			catch { }
 		}
@@ -193,7 +201,8 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 			ws = NetWebSocket.CreateFromStream( stream, isServer: true, subProtocol: null, TimeSpan.FromSeconds( 30 ) );
 
 			clientPeerId = Guid.NewGuid().ToString( "N" ).Substring( 0, 8 );
-			_clients[clientPeerId] = ws;
+			var session = new ClientSession { PeerId = clientPeerId, Socket = ws };
+			_clients[clientPeerId] = session;
 
 			Log.Info( $"[TeamSync] Remote peer connected from {tcpClient.Client.RemoteEndPoint} (temp id: {clientPeerId})" );
 
@@ -228,15 +237,21 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 					var envelope = TeamSyncEnvelope.Deserialize( json );
 					if ( envelope != null )
 					{
-						Log.Info( $"[TeamSync] 📥 Server received envelope '{envelope.Type}' from peer '{envelope.SenderId}'" );
+						if ( envelope.Type != TeamSyncMessageType.CameraUpdate )
+						{
+							Log.Info( $"[TeamSync] 📥 Server received envelope '{envelope.Type}' from peer '{envelope.SenderId}'" );
+						}
 
 						// If this is a Hello, associate the official peer ID
 						if ( envelope.Type == TeamSyncMessageType.Hello && !string.IsNullOrEmpty( envelope.SenderId ) )
 						{
 							string oldId = clientPeerId;
 							clientPeerId = envelope.SenderId;
-							_clients.TryRemove( oldId, out _ );
-							_clients[clientPeerId] = ws;
+							if ( _clients.TryRemove( oldId, out var existingSession ) )
+							{
+								existingSession.PeerId = clientPeerId;
+								_clients[clientPeerId] = existingSession;
+							}
 							OnPeerConnected?.Invoke( clientPeerId );
 						}
 
@@ -273,7 +288,10 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 		{
 			if ( !string.IsNullOrEmpty( clientPeerId ) )
 			{
-				_clients.TryRemove( clientPeerId, out _ );
+				if ( _clients.TryRemove( clientPeerId, out var removedSession ) )
+				{
+					try { removedSession.SendLock.Dispose(); } catch { }
+				}
 				OnPeerDisconnected?.Invoke( clientPeerId );
 			}
 
@@ -324,12 +342,27 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 	{
 		if ( !IsRunning || envelope == null ) return;
 
-		if ( !string.IsNullOrEmpty( envelope.SenderId ) && _clients.TryGetValue( envelope.SenderId, out var ws ) )
+		if ( !string.IsNullOrEmpty( envelope.SenderId ) && _clients.TryGetValue( envelope.SenderId, out var session ) )
 		{
-			if ( ws.State == NetWebSocketState.Open )
+			if ( session.Socket.State == NetWebSocketState.Open )
 			{
 				byte[] bytes = Encoding.UTF8.GetBytes( envelope.Serialize() );
-				await ws.SendAsync( new ArraySegment<byte>( bytes ), NetWebSocketMessageType.Text, true, CancellationToken.None );
+				await session.SendLock.WaitAsync();
+				try
+				{
+					if ( session.Socket.State == NetWebSocketState.Open )
+					{
+						await session.Socket.SendAsync( new ArraySegment<byte>( bytes ), NetWebSocketMessageType.Text, true, CancellationToken.None );
+					}
+				}
+				catch ( Exception ex )
+				{
+					OnError?.Invoke( $"Server send error ({session.PeerId}): {ex.Message}" );
+				}
+				finally
+				{
+					session.SendLock.Release();
+				}
 			}
 		}
 		else
@@ -345,18 +378,37 @@ public sealed class TeamSyncServer : ITeamSyncTransport
 		byte[] bytes = Encoding.UTF8.GetBytes( envelope.Serialize() );
 		var segment = new ArraySegment<byte>( bytes );
 
-		foreach ( var kvp in _clients )
+		var tasks = new List<Task>();
+		foreach ( var session in _clients.Values )
 		{
-			if ( kvp.Key == exceptPeerId ) continue;
+			if ( session.PeerId == exceptPeerId ) continue;
 
-			if ( kvp.Value.State == NetWebSocketState.Open )
+			if ( session.Socket.State == NetWebSocketState.Open )
 			{
-				try
-				{
-					await kvp.Value.SendAsync( segment, NetWebSocketMessageType.Text, true, CancellationToken.None );
-				}
-				catch { }
+				tasks.Add( SendToSessionSafeAsync( session, segment ) );
 			}
+		}
+
+		if ( tasks.Count > 0 )
+		{
+			await Task.WhenAll( tasks );
+		}
+	}
+
+	private static async Task SendToSessionSafeAsync( ClientSession session, ArraySegment<byte> segment )
+	{
+		await session.SendLock.WaitAsync();
+		try
+		{
+			if ( session.Socket.State == NetWebSocketState.Open )
+			{
+				await session.Socket.SendAsync( segment, NetWebSocketMessageType.Text, true, CancellationToken.None );
+			}
+		}
+		catch { }
+		finally
+		{
+			session.SendLock.Release();
 		}
 	}
 
