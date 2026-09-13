@@ -261,41 +261,72 @@ public sealed class TeamSyncManager
 	[EditorEvent.Frame]
 	public static void GlobalFrameUpdate()
 	{
-		_instance?.FrameUpdate();
+		try
+		{
+			_instance?.FrameUpdate();
+		}
+		catch ( Exception ex )
+		{
+			Log.Error( $"[TeamSync] Frame exception: {ex.Message}" );
+		}
 	}
 
 	public void FrameUpdate()
 	{
-		// 1. Drain incoming messages on the main UI/Editor thread
-		while ( _inboundQueue.TryDequeue( out var envelope ) )
+		try
 		{
-			ProcessEnvelope( envelope );
+			// 1. Drain incoming messages on the main UI/Editor thread
+			while ( _inboundQueue.TryDequeue( out var envelope ) )
+			{
+				ProcessEnvelope( envelope );
+			}
 		}
+		catch { }
 
 		if ( !IsSessionActive || Game.IsPlaying ) return;
 
-		// 2. Track & broadcast local editor camera transform (~15Hz)
-		float now = RealTime.Now;
-		if ( now - _lastCamBroadcastTime > 0.06f )
+		try
 		{
-			_lastCamBroadcastTime = now;
-			BroadcastLocalCamera();
+			// 2. Track & broadcast local editor camera transform (~15Hz)
+			float now = RealTime.Now;
+			if ( now - _lastCamBroadcastTime > 0.06f )
+			{
+				_lastCamBroadcastTime = now;
+				BroadcastLocalCamera();
+			}
 		}
+		catch { }
 
-		// 3. Track & broadcast local selection + lock requests
-		TrackLocalSelectionChanges();
-
-		// 4. Host lock pruning
-		if ( IsHost )
+		try
 		{
-			LockSystem.PruneExpiredLocks( TimeSpan.FromSeconds( 30 ) );
+			// 3. Track & broadcast local selection + lock requests
+			TrackLocalSelectionChanges();
 		}
+		catch { }
 
-		// 5. Render lock gizmos
-		LockSystem.DrawLockGizmos();
+		try
+		{
+			// 4. Host lock pruning
+			if ( IsHost )
+			{
+				LockSystem.PruneExpiredLocks( TimeSpan.FromSeconds( 30 ) );
+			}
+		}
+		catch { }
 
-		// 6. Run sync system change detection
-		SyncSystem.FrameUpdate();
+		try
+		{
+			// 5. Render lock gizmos
+			LockSystem.DrawLockGizmos();
+		}
+		catch { }
+
+		try
+		{
+			// 6. Run sync system change detection
+			SyncSystem.FrameUpdate();
+		}
+		catch { }
 	}
 
 	private void BroadcastLocalCamera()

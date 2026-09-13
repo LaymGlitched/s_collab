@@ -218,44 +218,52 @@ public sealed class SelectionLockSystem
 	/// </summary>
 	public void DrawLockGizmos()
 	{
-		if ( !_manager.IsSessionActive || Game.IsPlaying ) return;
-
-		var session = SceneEditorSession.Active;
-		if ( session == null || session.Scene == null ) return;
-
-		using ( Gizmo.Scope( "TeamSync_Locks" ) )
+		try
 		{
-			foreach ( var kvp in _activeLocks )
+			if ( Gizmo.Camera == null ) return;
+			if ( !_manager.IsSessionActive || Game.IsPlaying ) return;
+
+			var session = SceneEditorSession.Active;
+			if ( session == null || session.Scene == null ) return;
+
+			using ( Gizmo.Scope( "TeamSync_Locks" ) )
 			{
-				string goIdStr = kvp.Key;
-				string holderPeerId = kvp.Value;
-
-				if ( holderPeerId == _manager.LocalPeerId ) continue; // Local user knows their own selection
-
-				if ( !Guid.TryParse( goIdStr, out var goGuid ) ) continue;
-
-				var go = session.Scene.Directory.FindByGuid( goGuid );
-				if ( go == null || !go.IsValid() ) continue;
-
-				if ( !_manager.Collaborators.TryGetValue( holderPeerId, out var peer ) ) continue;
-
-				var color = peer.Color;
-				Gizmo.Draw.Color = color;
-				Gizmo.Draw.LineThickness = 3f;
-
-				// Draw wire bounding box around locked object
-				var bbox = go.GetBounds();
-				if ( bbox.Size.Length > 0.1f )
+				foreach ( var kvp in _activeLocks )
 				{
-					Gizmo.Draw.LineBBox( bbox );
-				}
+					string goIdStr = kvp.Key;
+					string holderPeerId = kvp.Value;
 
-				// Draw floating badge over the locked object
-				Vector3 topPos = bbox.Center + Vector3.Up * (bbox.Size.z * 0.5f + 10f);
-				var textTransform = new Transform( topPos, Rotation.Identity, 0.8f );
-				string text = $"🔒 {peer.PersonaName}";
-				Gizmo.Draw.WorldText( text, textTransform, "Poppins", 18f, TextFlag.Center );
+					if ( holderPeerId == _manager.LocalPeerId ) continue; // Local user knows their own selection
+
+					if ( !Guid.TryParse( goIdStr, out var goGuid ) ) continue;
+
+					var go = session.Scene.Directory.FindByGuid( goGuid );
+					if ( go == null || !go.IsValid() ) continue;
+
+					if ( !_manager.Collaborators.TryGetValue( holderPeerId, out var peer ) ) continue;
+
+					var color = peer.Color;
+					Gizmo.Draw.Color = color;
+					Gizmo.Draw.LineThickness = 3f;
+
+					// Draw wire bounding box around locked object
+					var bbox = go.GetBounds();
+					if ( bbox.Size.Length > 0.1f )
+					{
+						Gizmo.Draw.LineBBox( bbox );
+					}
+
+					// Draw floating badge over the locked object
+					Vector3 topPos = bbox.Center + Vector3.Up * (bbox.Size.z * 0.5f + 10f);
+					var textTransform = new Transform( topPos, Rotation.Identity, 0.8f );
+					string text = $"🔒 {peer.PersonaName}";
+					Gizmo.Draw.WorldText( text, textTransform, "Poppins", 18f, TextFlag.Center );
+				}
 			}
+		}
+		catch
+		{
+			// Safely ignore when Gizmo rendering context is not active
 		}
 	}
 }

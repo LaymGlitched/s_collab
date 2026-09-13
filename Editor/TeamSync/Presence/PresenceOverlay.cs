@@ -35,60 +35,79 @@ public static class PresenceOverlay
 	[EditorEvent.Frame]
 	public static void FrameUpdate()
 	{
-		var manager = TeamSyncManager.Instance;
-		if ( manager == null || !manager.IsSessionActive || Game.IsPlaying )
+		try
 		{
-			CleanupAllMarkers();
-			return;
-		}
+			var manager = TeamSyncManager.Instance;
+			if ( manager == null || !manager.IsSessionActive || Game.IsPlaying )
+			{
+				CleanupAllMarkers();
+				return;
+			}
 
-		var session = SceneEditorSession.Active;
-		if ( session == null || session.Scene == null || session.Scene.SceneWorld == null )
+			var session = SceneEditorSession.Active;
+			if ( session == null || session.Scene == null || session.Scene.SceneWorld == null )
+			{
+				CleanupAllMarkers();
+				return;
+			}
+
+			var activePeerIds = new HashSet<string>();
+
+			// Update or spawn SceneModel visual markers for each remote collaborator
+			foreach ( var peer in manager.Collaborators.Values )
+			{
+				if ( peer.PeerId == manager.LocalPeerId ) continue; // Don't draw self
+
+				activePeerIds.Add( peer.PeerId );
+				UpdatePeerMarker( session.Scene.SceneWorld, peer );
+			}
+
+			// Prune markers for peers that left
+			var toRemove = _markerModels.Keys.Where( k => !activePeerIds.Contains( k ) ).ToList();
+			foreach ( var id in toRemove )
+			{
+				RemoveMarker( id );
+			}
+
+			// Draw Gizmos in 3D Viewport
+			DrawPresenceGizmos( manager );
+		}
+		catch
 		{
-			CleanupAllMarkers();
-			return;
+			// Prevent any frame hook exceptions from crashing the event system
 		}
-
-		var activePeerIds = new HashSet<string>();
-
-		// Update or spawn SceneModel visual markers for each remote collaborator
-		foreach ( var peer in manager.Collaborators.Values )
-		{
-			if ( peer.PeerId == manager.LocalPeerId ) continue; // Don't draw self
-
-			activePeerIds.Add( peer.PeerId );
-			UpdatePeerMarker( session.Scene.SceneWorld, peer );
-		}
-
-		// Prune markers for peers that left
-		var toRemove = _markerModels.Keys.Where( k => !activePeerIds.Contains( k ) ).ToList();
-		foreach ( var id in toRemove )
-		{
-			RemoveMarker( id );
-		}
-
-		// Draw Gizmos in 3D Viewport
-		DrawPresenceGizmos( manager );
 	}
 
 	private static void UpdatePeerMarker( SceneWorld sceneWorld, CollaboratorState peer )
 	{
-		if ( !_markerModels.TryGetValue( peer.PeerId, out var model ) || model == null || !model.IsValid() )
+		try
 		{
-			var cameraModel = Model.Load( "models/editor/camera.vmdl" );
-			var transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation() );
-			
-			model = new SceneModel( sceneWorld, cameraModel, transform );
-			model.ColorTint = peer.Color;
+			if ( !_markerModels.TryGetValue( peer.PeerId, out var model ) || model == null || !model.IsValid() )
+			{
+				var modelAsset = Model.Load( "models/editor/camera.vmdl" );
+				if ( modelAsset == null || !modelAsset.IsValid() )
+				{
+					modelAsset = Model.Cube;
+				}
 
-			_markerModels[peer.PeerId] = model;
+				var transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation(), new Vector3( 0.25f, 0.4f, 0.25f ) );
+				
+				model = new SceneModel( sceneWorld, modelAsset, transform );
+				model.ColorTint = peer.Color;
+
+				_markerModels[peer.PeerId] = model;
+			}
+
+			// Sync transform & color
+			model.Transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation(), new Vector3( 0.25f, 0.4f, 0.25f ) );
+			if ( model.ColorTint != peer.Color )
+			{
+				model.ColorTint = peer.Color;
+			}
 		}
-
-		// Sync transform & color
-		model.Transform = new Transform( peer.CameraPosition, peer.CameraAngles.ToRotation() );
-		if ( model.ColorTint != peer.Color )
+		catch
 		{
-			model.ColorTint = peer.Color;
+			// Safe fallback
 		}
 	}
 
