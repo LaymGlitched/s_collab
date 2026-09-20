@@ -20,12 +20,18 @@ public static class SceneApplicator
 		_remoteToLocalComponentMap.Clear();
 	}
 
-	public static void ApplyDelta( SceneDeltaPayload delta )
+	public static void ApplyDelta( SceneDeltaPayload delta, string senderId = null )
 	{
 		if ( delta == null ) return;
 
 		var session = SceneEditorSession.Active;
 		if ( session == null || session.Scene == null ) return;
+
+		string senderName = "Collaborator";
+		if ( !string.IsNullOrEmpty( senderId ) && TeamSyncManager.Instance != null && TeamSyncManager.Instance.Collaborators.TryGetValue( senderId, out var peer ) )
+		{
+			senderName = peer.PersonaName;
+		}
 
 		IsApplyingRemoteChange = true;
 		try
@@ -33,11 +39,11 @@ public static class SceneApplicator
 			switch ( delta.DeltaType )
 			{
 				case SceneDeltaType.CreateGameObject:
-					ApplyCreateGameObject( session.Scene, delta );
+					ApplyCreateGameObject( session.Scene, delta, senderName );
 					break;
 
 				case SceneDeltaType.DeleteGameObject:
-					ApplyDeleteGameObject( session.Scene, delta );
+					ApplyDeleteGameObject( session.Scene, delta, senderName );
 					break;
 
 				case SceneDeltaType.SetTransform:
@@ -84,6 +90,9 @@ public static class SceneApplicator
 					ApplySetComponentProperty( session.Scene, delta );
 					break;
 			}
+
+			// Mark host scene dirty when remote edits land
+			session.HasUnsavedChanges = true;
 		}
 		catch ( Exception ex )
 		{
@@ -119,7 +128,7 @@ public static class SceneApplicator
 		return null;
 	}
 
-	private static void ApplyCreateGameObject( Scene scene, SceneDeltaPayload delta )
+	private static void ApplyCreateGameObject( Scene scene, SceneDeltaPayload delta, string senderName )
 	{
 		if ( delta.Name != null && (delta.Name.Equals( "editor_camera", StringComparison.OrdinalIgnoreCase ) || delta.Name.StartsWith( "editor_", StringComparison.OrdinalIgnoreCase )) )
 		{
@@ -138,6 +147,8 @@ public static class SceneApplicator
 		var go = scene.CreateObject();
 		go.Name = string.IsNullOrEmpty( delta.Name ) ? "GameObject" : delta.Name;
 		go.Enabled = delta.Enabled;
+
+		ActivityChatSystem.Instance.LogActivity( senderName, $"created '{go.Name}'" );
 
 		if ( parent != null )
 		{
@@ -167,21 +178,14 @@ public static class SceneApplicator
 		{
 			go.NetworkMode = (NetworkMode)delta.NetworkMode.Value;
 		}
-		if ( delta.Networked.HasValue )
-		{
-			go.Networked = delta.Networked.Value;
-		}
-		if ( delta.NetworkInterpolation.HasValue )
-		{
-			go.NetworkInterpolation = delta.NetworkInterpolation.Value;
-		}
-
 		if ( !string.IsNullOrEmpty( delta.PrefabSource ) )
 		{
 			try
 			{
+#pragma warning disable CS0618
 				go.SetPrefabSource( delta.PrefabSource );
 				go.UpdateFromPrefab();
+#pragma warning restore CS0618
 			}
 			catch { }
 		}
@@ -195,12 +199,14 @@ public static class SceneApplicator
 		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
 	}
 
-	private static void ApplyDeleteGameObject( Scene scene, SceneDeltaPayload delta )
+	private static void ApplyDeleteGameObject( Scene scene, SceneDeltaPayload delta, string senderName )
 	{
 		TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteObject( delta.TargetGameObjectId );
 		var go = FindGameObject( scene, delta.TargetGameObjectId );
 		if ( go != null && go.IsValid() )
 		{
+			string objName = go.Name;
+			ActivityChatSystem.Instance.LogActivity( senderName, $"deleted '{objName}'" );
 			TeamSyncManager.Instance?.SyncSystem?.UnregisterRemoteObject( go.Id.ToString() );
 			if ( !string.IsNullOrEmpty( delta.TargetGameObjectId ) )
 			{
@@ -298,14 +304,7 @@ public static class SceneApplicator
 		{
 			go.NetworkMode = (NetworkMode)delta.NetworkMode.Value;
 		}
-		if ( delta.Networked.HasValue )
-		{
-			go.Networked = delta.Networked.Value;
-		}
-		if ( delta.NetworkInterpolation.HasValue )
-		{
-			go.NetworkInterpolation = delta.NetworkInterpolation.Value;
-		}
+
 		TeamSyncManager.Instance?.SyncSystem?.RegisterRemoteObject( go );
 	}
 

@@ -13,6 +13,7 @@ public sealed class SelectionLockSystem
 	private readonly ConcurrentDictionary<string, DateTime> _lockTimestamps = new();
 
 	public IReadOnlyDictionary<string, string> ActiveLocks => _activeLocks;
+	public event Action OnLocksChanged;
 
 	public SelectionLockSystem( TeamSyncManager manager )
 	{
@@ -53,6 +54,11 @@ public sealed class SelectionLockSystem
 
 		_activeLocks[gameObjectId] = peerId;
 		_lockTimestamps[gameObjectId] = DateTime.UtcNow;
+
+		string holderName = ResolvePeerName( peerId );
+		string objectName = ResolveObjectName( gameObjectId );
+		ActivityChatSystem.Instance.LogActivity( holderName, $"locked '{objectName}'" );
+		OnLocksChanged?.Invoke();
 		return true;
 	}
 
@@ -68,6 +74,11 @@ public sealed class SelectionLockSystem
 		{
 			_activeLocks.TryRemove( gameObjectId, out _ );
 			_lockTimestamps.TryRemove( gameObjectId, out _ );
+
+			string holderName = ResolvePeerName( peerId );
+			string objectName = ResolveObjectName( gameObjectId );
+			ActivityChatSystem.Instance.LogActivity( holderName, $"unlocked '{objectName}'" );
+			OnLocksChanged?.Invoke();
 			return true;
 		}
 		return false;
@@ -127,6 +138,34 @@ public sealed class SelectionLockSystem
 	/// </summary>
 	public void ApplyLockUpdate( Dictionary<string, string> locks )
 	{
+		if ( _manager != null && !_manager.IsHost )
+		{
+			var current = new Dictionary<string, string>( _activeLocks );
+			var updated = locks ?? new Dictionary<string, string>();
+
+			// Check newly added locks
+			foreach ( var kvp in updated )
+			{
+				if ( !current.TryGetValue( kvp.Key, out var oldHolder ) || oldHolder != kvp.Value )
+				{
+					string holderName = ResolvePeerName( kvp.Value );
+					string objectName = ResolveObjectName( kvp.Key );
+					ActivityChatSystem.Instance.LogActivity( holderName, $"locked '{objectName}'" );
+				}
+			}
+
+			// Check removed locks
+			foreach ( var kvp in current )
+			{
+				if ( !updated.ContainsKey( kvp.Key ) )
+				{
+					string holderName = ResolvePeerName( kvp.Value );
+					string objectName = ResolveObjectName( kvp.Key );
+					ActivityChatSystem.Instance.LogActivity( holderName, $"unlocked '{objectName}'" );
+				}
+			}
+		}
+
 		_activeLocks.Clear();
 		if ( locks != null )
 		{
@@ -139,6 +178,31 @@ public sealed class SelectionLockSystem
 
 		// Enforce locks against local selection
 		EnforceLocalSelectionLocks();
+		OnLocksChanged?.Invoke();
+	}
+
+	private string ResolvePeerName( string peerId )
+	{
+		if ( _manager != null )
+		{
+			if ( peerId == _manager.LocalPeerId ) return _manager.LocalPersonaName;
+			if ( _manager.Collaborators.TryGetValue( peerId, out var peer ) ) return peer.PersonaName;
+		}
+		return peerId;
+	}
+
+	private static string ResolveObjectName( string gameObjectId )
+	{
+		var session = SceneEditorSession.Active;
+		if ( session?.Scene != null )
+		{
+			var go = SceneApplicator.FindGameObject( session.Scene, gameObjectId );
+			if ( go != null && !string.IsNullOrEmpty( go.Name ) )
+			{
+				return go.Name;
+			}
+		}
+		return gameObjectId.Length > 8 ? gameObjectId.Substring( 0, 8 ) : gameObjectId;
 	}
 
 	/// <summary>
@@ -158,6 +222,11 @@ public sealed class SelectionLockSystem
 		if ( _manager.IsHost && toRemove.Count > 0 )
 		{
 			BroadcastLockTable();
+		}
+
+		if ( toRemove.Count > 0 )
+		{
+			OnLocksChanged?.Invoke();
 		}
 	}
 

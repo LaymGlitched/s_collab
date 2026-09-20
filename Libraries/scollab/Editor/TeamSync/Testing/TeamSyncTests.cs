@@ -14,10 +14,10 @@ public static class TeamSyncTests
 	}
 
 
+
 	[ConCmd( "teamsync_test" )]
 	public static void RunAllTestsCmd()
 	{
-		Log.Info( "=================================================" );
 		Log.Info( "[TeamSync] Running Real-Time Collaboration Automated Tests..." );
 		Log.Info( "=================================================" );
 
@@ -53,6 +53,8 @@ public static class TeamSyncTests
 		results.Add( TestProjectFileSync() );
 		results.Add( TestDeterministicColors() );
 		results.Add( TestRoomCodeParsingAndEncoding() );
+		results.Add( TestChatAndActivitySystem() );
+		results.Add( TestSceneDirtyAndAutoSave() );
 
 		return results;
 	}
@@ -468,6 +470,98 @@ public static class TeamSyncTests
 		catch ( Exception ex )
 		{
 			return new TestResult { Name = "Deterministic Colors", Passed = false, Message = ex.Message };
+		}
+	}
+
+	private static TestResult TestChatAndActivitySystem()
+	{
+		try
+		{
+			// 1. Serialization
+			var chatPayload = new ChatMessagePayload
+			{
+				SenderName = "Yyk",
+				SenderColor = "#10B981",
+				Message = "This good?"
+			};
+			var env = TeamSyncEnvelope.Create( TeamSyncMessageType.ChatMessage, "peer_123", chatPayload );
+			var deserialized = TeamSyncEnvelope.Deserialize( env.Serialize() );
+			if ( deserialized == null || deserialized.Type != TeamSyncMessageType.ChatMessage )
+				return new TestResult { Name = "Chat & Activity System", Passed = false, Message = "ChatMessage envelope failed to serialize/deserialize." };
+
+			var restoredPayload = deserialized.GetPayload<ChatMessagePayload>();
+			if ( restoredPayload == null || restoredPayload.SenderName != "Yyk" || restoredPayload.Message != "This good?" )
+				return new TestResult { Name = "Chat & Activity System", Passed = false, Message = "ChatMessage payload contents corrupted." };
+
+			// 2. Activity & Chat formatting
+			var chatSys = ActivityChatSystem.Instance;
+			chatSys.Clear();
+
+			chatSys.LogActivity( "Laym", "created 'Light_Ceiling'" );
+			chatSys.LogActivity( "Yyk", "locked 'Main_Character'" );
+			chatSys.ReceiveChat( chatPayload );
+
+			var entries = chatSys.Entries;
+			if ( entries.Count < 3 )
+				return new TestResult { Name = "Chat & Activity System", Passed = false, Message = $"Expected at least 3 entries, got {entries.Count}." };
+
+			// Verify exact format: "03:15: Laym created 'Light_Ceiling'"
+			string e0 = entries[0].FormattedText;
+			if ( !e0.EndsWith( ": Laym created 'Light_Ceiling'" ) )
+				return new TestResult { Name = "Chat & Activity System", Passed = false, Message = $"Entry 0 format mismatch: '{e0}'" };
+
+			string e1 = entries[1].FormattedText;
+			if ( !e1.EndsWith( ": Yyk locked 'Main_Character'" ) )
+				return new TestResult { Name = "Chat & Activity System", Passed = false, Message = $"Entry 1 format mismatch: '{e1}'" };
+
+			// Verify chat format: "03:21: Yyk: This good?"
+			string e2 = entries[2].FormattedText;
+			if ( !e2.EndsWith( ": Yyk: This good?" ) )
+				return new TestResult { Name = "Chat & Activity System", Passed = false, Message = $"Entry 2 format mismatch: '{e2}'" };
+
+			return new TestResult { Name = "Chat & Activity System", Passed = true, Message = "ChatMessage envelope, activity logging, and exact message format verified." };
+		}
+		catch ( Exception ex )
+		{
+			return new TestResult { Name = "Chat & Activity System", Passed = false, Message = ex.Message };
+		}
+	}
+
+	private static TestResult TestSceneDirtyAndAutoSave()
+	{
+		try
+		{
+			var session = SceneEditorSession.Active;
+			if ( session == null || session.Scene == null )
+				return new TestResult { Name = "Scene Dirty & Auto-Save", Passed = false, Message = "No active SceneEditorSession." };
+
+			string testId = Guid.NewGuid().ToString();
+			var delta = new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.CreateGameObject,
+				TargetGameObjectId = testId,
+				Name = "TeamSync_DirtyTest_Obj",
+				Enabled = true
+			};
+
+			// Apply delta as if from remote collaborator
+			SceneApplicator.ApplyDelta( delta, "remote_peer" );
+
+			if ( !session.HasUnsavedChanges )
+				return new TestResult { Name = "Scene Dirty & Auto-Save", Passed = false, Message = "session.HasUnsavedChanges was not set to true after remote delta!" };
+
+			// Clean up test object
+			SceneApplicator.ApplyDelta( new SceneDeltaPayload
+			{
+				DeltaType = SceneDeltaType.DeleteGameObject,
+				TargetGameObjectId = testId
+			}, "remote_peer" );
+
+			return new TestResult { Name = "Scene Dirty & Auto-Save", Passed = true, Message = "Host scene marked dirty (HasUnsavedChanges = true) on remote edits." };
+		}
+		catch ( Exception ex )
+		{
+			return new TestResult { Name = "Scene Dirty & Auto-Save", Passed = false, Message = ex.Message };
 		}
 	}
 }

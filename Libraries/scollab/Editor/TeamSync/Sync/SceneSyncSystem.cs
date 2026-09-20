@@ -19,8 +19,6 @@ public sealed class SceneSyncSystem
 		public bool IsStatic;
 		public List<string> Tags = new();
 		public NetworkMode NetworkMode;
-		public bool Networked;
-		public bool NetworkInterpolation;
 		public string PrefabSource;
 		public Dictionary<Guid, string> Components = new();
 	}
@@ -104,8 +102,6 @@ public sealed class SceneSyncSystem
 			IsStatic = go.IsStatic,
 			Tags = GetTagsList( go ),
 			NetworkMode = go.NetworkMode,
-			Networked = go.Networked,
-			NetworkInterpolation = go.NetworkInterpolation,
 			PrefabSource = go.PrefabInstanceSource,
 			Components = SnapshotComponents( go )
 		};
@@ -163,8 +159,6 @@ public sealed class SceneSyncSystem
 				IsStatic = go.IsStatic,
 				Tags = GetTagsList( go ),
 				NetworkMode = go.NetworkMode,
-				Networked = go.Networked,
-				NetworkInterpolation = go.NetworkInterpolation,
 				PrefabSource = go.PrefabInstanceSource,
 				Components = SnapshotComponents( go )
 			};
@@ -205,8 +199,6 @@ public sealed class SceneSyncSystem
 					IsStatic = go.IsStatic,
 					Tags = GetTagsList( go ),
 					NetworkMode = go.NetworkMode,
-					Networked = go.Networked,
-					NetworkInterpolation = go.NetworkInterpolation,
 					PrefabSource = go.PrefabInstanceSource,
 					Components = SnapshotComponents( go )
 				};
@@ -225,10 +217,10 @@ public sealed class SceneSyncSystem
 					IsStatic = tracked.IsStatic,
 					Tags = tracked.Tags,
 					NetworkMode = (int)tracked.NetworkMode,
-					Networked = tracked.Networked,
-					NetworkInterpolation = tracked.NetworkInterpolation,
 					PrefabSource = tracked.PrefabSource
 				} );
+
+				ActivityChatSystem.Instance.LogActivity( _manager.LocalPersonaName, $"created '{tracked.Name}'" );
 
 				// If it already has components (e.g. spawned model renderer, collider, or prefab components)
 				foreach ( var comp in go.Components.GetAll() )
@@ -343,22 +335,16 @@ public sealed class SceneSyncSystem
 					} );
 				}
 
-				// 7. Check for NetworkMode / Networked / NetworkInterpolation changes
-				if ( tracked.NetworkMode != go.NetworkMode ||
-				     tracked.Networked != go.Networked ||
-				     tracked.NetworkInterpolation != go.NetworkInterpolation )
+				// 7. Check for NetworkMode changes
+				if ( tracked.NetworkMode != go.NetworkMode )
 				{
 					tracked.NetworkMode = go.NetworkMode;
-					tracked.Networked = go.Networked;
-					tracked.NetworkInterpolation = go.NetworkInterpolation;
 
 					_manager.BroadcastSceneDelta( new SceneDeltaPayload
 					{
 						DeltaType = SceneDeltaType.SetNetworkMode,
 						TargetGameObjectId = id,
-						NetworkMode = (int)tracked.NetworkMode,
-						Networked = tracked.Networked,
-						NetworkInterpolation = tracked.NetworkInterpolation
+						NetworkMode = (int)tracked.NetworkMode
 					} );
 				}
 
@@ -425,6 +411,10 @@ public sealed class SceneSyncSystem
 		var deletedIds = _trackedObjects.Keys.Where( k => !currentIds.Contains( k ) ).ToList();
 		foreach ( var deletedId in deletedIds )
 		{
+			if ( _trackedObjects.TryGetValue( deletedId, out var deletedTracked ) )
+			{
+				ActivityChatSystem.Instance.LogActivity( _manager.LocalPersonaName, $"deleted '{deletedTracked.Name}'" );
+			}
 			_trackedObjects.Remove( deletedId );
 			_manager.BroadcastSceneDelta( new SceneDeltaPayload
 			{

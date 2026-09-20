@@ -17,6 +17,10 @@ public sealed class TeamSyncDock : Widget
 	private string _publicIp = "Resolving...";
 	private string _lastJoinError = string.Empty;
 
+	public TeamSyncDock() : this( null )
+	{
+	}
+
 	public TeamSyncDock( Widget parent ) : base( parent )
 	{
 		Layout = Layout.Column();
@@ -26,18 +30,58 @@ public sealed class TeamSyncDock : Widget
 		_primaryLocalIp = IpResolver.GetPrimaryLocalIp();
 		_ = ResolvePublicIpAsync();
 
-		LanDiscoveryService.Instance.OnSessionsChanged += () =>
-		{
-			_cachedStateHash = string.Empty;
-		};
+		LanDiscoveryService.Instance.OnSessionsChanged += HandleSessionsChanged;
 
+		var manager = TeamSyncManager.Instance;
+		if ( manager != null )
+		{
+			manager.OnSessionStateChanged += HandleRefresh;
+			manager.OnCollaboratorJoined += HandleCollaboratorJoined;
+			manager.OnCollaboratorLeft += HandleCollaboratorLeft;
+			manager.OnPeriodicRefresh += HandlePeriodicRefresh;
+			if ( manager.LockSystem != null )
+			{
+				manager.LockSystem.OnLocksChanged += HandleRefresh;
+			}
+		}
+
+		BuildUi();
+	}
+
+	public override void OnDestroyed()
+	{
+		base.OnDestroyed();
+		LanDiscoveryService.Instance.OnSessionsChanged -= HandleSessionsChanged;
+
+		var manager = TeamSyncManager.Instance;
+		if ( manager != null )
+		{
+			manager.OnSessionStateChanged -= HandleRefresh;
+			manager.OnCollaboratorJoined -= HandleCollaboratorJoined;
+			manager.OnCollaboratorLeft -= HandleCollaboratorLeft;
+			manager.OnPeriodicRefresh -= HandlePeriodicRefresh;
+			if ( manager.LockSystem != null )
+			{
+				manager.LockSystem.OnLocksChanged -= HandleRefresh;
+			}
+		}
+	}
+
+	private void HandleSessionsChanged() => HandleRefresh();
+	private void HandleCollaboratorJoined( CollaboratorState _ ) => HandleRefresh();
+	private void HandleCollaboratorLeft( string _ ) => HandleRefresh();
+
+	private void HandleRefresh()
+	{
+		if ( !this.IsValid() ) return;
+		_cachedStateHash = string.Empty;
 		BuildUi();
 	}
 
 	private async Task ResolvePublicIpAsync()
 	{
 		_publicIp = await IpResolver.GetPublicIpAsync();
-		_cachedStateHash = string.Empty;
+		HandleRefresh();
 	}
 
 	private void BuildUi()
@@ -269,6 +313,14 @@ public sealed class TeamSyncDock : Widget
 		sessionTitle.Color = Theme.Green;
 		sessionBar.Add( sessionTitle, 1 );
 
+		var chatBtn = new Button( "Chat", "chat" );
+		chatBtn.ToolTip = "Open In-Editor Chat & Activity Log";
+		chatBtn.Clicked = () =>
+		{
+			TeamSyncChatDock.OpenWindow();
+		};
+		sessionBar.Add( chatBtn );
+
 		var leaveBtn = new Button( "Leave Session", "logout" );
 		leaveBtn.Clicked = () =>
 		{
@@ -440,12 +492,14 @@ public sealed class TeamSyncDock : Widget
 		BuildUi();
 	}
 
-	[EditorEvent.Frame]
-	private void FrameUpdate()
+	private void HandlePeriodicRefresh()
 	{
+		if ( !this.IsValid() ) return;
 		if ( !Visible ) return;
 
 		var manager = TeamSyncManager.Instance;
+		if ( manager == null ) return;
+
 		int discoveredCount = LanDiscoveryService.Instance.DiscoveredSessions.Count;
 		string currentStateHash = $"{manager.IsSessionActive}_{manager.Collaborators.Count}_{manager.LockSystem.ActiveLocks.Count}_{manager.StatusText}_{discoveredCount}_{_publicIp}_{_lastJoinError}";
 
@@ -454,5 +508,18 @@ public sealed class TeamSyncDock : Widget
 			_cachedStateHash = currentStateHash;
 			BuildUi();
 		}
+	}
+
+	[ConCmd( "teamsync_open" )]
+	public static void OpenWindow()
+	{
+		if ( DockHelper.OpenDock( "Team Sync" ) )
+			return;
+
+		var win = new TeamSyncDock();
+		win.WindowTitle = "Team Sync";
+		win.SetWindowIcon( "groups" );
+		win.Show();
+		win.Focus();
 	}
 }

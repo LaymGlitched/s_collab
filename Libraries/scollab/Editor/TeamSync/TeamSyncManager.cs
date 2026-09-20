@@ -24,6 +24,7 @@ public sealed class TeamSyncManager
 	public event Action OnSessionStateChanged;
 	public event Action<CollaboratorState> OnCollaboratorJoined;
 	public event Action<string> OnCollaboratorLeft;
+	public event Action OnPeriodicRefresh;
 
 	private readonly ConcurrentQueue<TeamSyncEnvelope> _inboundQueue = new();
 	private readonly List<TeamSyncEnvelope> _inboundPlayModeBuffer = new();
@@ -31,6 +32,8 @@ public sealed class TeamSyncManager
 	private Vector3 _lastBroadcastCamPos;
 	private Angles _lastBroadcastCamAngles;
 	private float _lastCamBroadcastTime;
+	private float _lastAutoSaveTime;
+	private RealTimeSince _lastDockRefresh;
 	private HashSet<string> _lastLocalSelection = new();
 
 	private TeamSyncManager()
@@ -81,9 +84,15 @@ public sealed class TeamSyncManager
 		}
 	}
 
+	static TeamSyncManager()
+	{
+		HealOrphanedWidgetHandles();
+	}
+
 	[EditorEvent.Hotload]
 	private static void OnHotload()
 	{
+		HealOrphanedWidgetHandles();
 		// Preserve singleton instance across hotloads
 		if ( _instance != null )
 		{
@@ -303,6 +312,12 @@ public sealed class TeamSyncManager
 		_ = Transport.BroadcastAsync( TeamSyncEnvelope.Create( TeamSyncMessageType.SceneDelta, LocalPeerId, delta ) );
 	}
 
+	public void BroadcastEnvelope( TeamSyncEnvelope envelope )
+	{
+		if ( !IsSessionActive || envelope == null || Transport == null ) return;
+		_ = Transport.BroadcastAsync( envelope );
+	}
+
 	[EditorEvent.Frame]
 	public static void GlobalFrameUpdate()
 	{
@@ -327,6 +342,13 @@ public sealed class TeamSyncManager
 			}
 		}
 		catch { }
+
+		if ( _lastDockRefresh > 0.5f )
+		{
+			_lastDockRefresh = 0;
+			HealOrphanedWidgetHandles();
+			try { OnPeriodicRefresh?.Invoke(); } catch { }
+		}
 
 		// Handle Play Mode exit -> apply buffered remote scene changes
 		if ( _wasPlaying && !Game.IsPlaying )
@@ -391,6 +413,36 @@ public sealed class TeamSyncManager
 			SyncSystem.FrameUpdate();
 		}
 		catch { }
+
+		try
+		{
+			// 7. Periodic auto-save snapshots (Host only)
+			if ( IsHost && RealTime.Now - _lastAutoSaveTime > 120f )
+			{
+				_lastAutoSaveTime = RealTime.Now;
+				PerformAutoSave();
+			}
+		}
+		catch { }
+	}
+
+	private void PerformAutoSave()
+	{
+		var session = SceneEditorSession.Active;
+		if ( session == null || !session.HasUnsavedChanges ) return;
+
+		try
+		{
+			session.Save( false );
+			Log.Info( "[TeamSync] 💾 Auto-save: Scene snapshot saved successfully." );
+			ActivityChatSystem.Instance.LogActivity( "System", "Auto-saved scene snapshot" );
+
+			BroadcastEnvelope( TeamSyncEnvelope.Create( TeamSyncMessageType.SceneSaveNotice, LocalPeerId, "saved" ) );
+		}
+		catch ( Exception ex )
+		{
+			Log.Warning( $"[TeamSync] Auto-save failed: {ex.Message}" );
+		}
 	}
 
 	private void BroadcastLocalCamera()
@@ -536,8 +588,20 @@ public sealed class TeamSyncManager
 				var delta = env.GetPayload<SceneDeltaPayload>();
 				if ( delta != null )
 				{
-					SceneApplicator.ApplyDelta( delta );
+					SceneApplicator.ApplyDelta( delta, env.SenderId );
 				}
+				break;
+
+			case TeamSyncMessageType.ChatMessage:
+				var chatPayload = env.GetPayload<ChatMessagePayload>();
+				if ( chatPayload != null )
+				{
+					ActivityChatSystem.Instance.ReceiveChat( chatPayload );
+				}
+				break;
+
+			case TeamSyncMessageType.SceneSaveNotice:
+				ActivityChatSystem.Instance.LogActivity( "Host", "Saved scene snapshot to disk" );
 				break;
 
 			case TeamSyncMessageType.SceneSnapshot:
@@ -558,9 +622,11 @@ public sealed class TeamSyncManager
 
 			case TeamSyncMessageType.PeerLeft:
 				string leftId = env.PayloadJson?.Trim( '"' ) ?? env.SenderId;
+				string leftName = Collaborators.TryGetValue( leftId, out var leftPeer ) ? leftPeer.PersonaName : leftId;
 				Collaborators.TryRemove( leftId, out _ );
 				LockSystem.ReleaseLocksForPeer( leftId );
 				OnCollaboratorLeft?.Invoke( leftId );
+				ActivityChatSystem.Instance.LogActivity( leftName, "left the session" );
 				break;
 		}
 	}
@@ -571,7 +637,7 @@ public sealed class TeamSyncManager
 		if ( env.Type == TeamSyncMessageType.SceneDelta )
 		{
 			var delta = env.GetPayload<SceneDeltaPayload>();
-			if ( delta != null ) SceneApplicator.ApplyDelta( delta );
+			if ( delta != null ) SceneApplicator.ApplyDelta( delta, env.SenderId );
 		}
 		else if ( env.Type == TeamSyncMessageType.SceneSnapshot )
 		{
@@ -586,6 +652,7 @@ public sealed class TeamSyncManager
 		if ( hello == null ) return;
 
 		Log.Info( $"[TeamSync] 🤝 Remote collaborator joined: {hello.PersonaName} (PeerId: {hello.PeerId})!" );
+		ActivityChatSystem.Instance.LogActivity( hello.PersonaName, "joined the session" );
 
 		var peer = new CollaboratorState( hello.PeerId, hello.PersonaName, hello.SteamId, hello.ColorHex )
 		{
@@ -680,5 +747,42 @@ public sealed class TeamSyncManager
 			}
 			peer.LastSeen = DateTime.UtcNow;
 		}
+	}
+
+	/// <summary>
+	/// Scans Sandbox.InteropSystem for orphaned null widget handles (which occur when Qt retains a native
+	/// widget whose C# peer was collected or cleared during an assembly unload) and binds a dummy
+	/// Widget so Qt event dispatching does not spam the console.
+	/// </summary>
+	public static void HealOrphanedWidgetHandles()
+	{
+		try
+		{
+			var interopType = Type.GetType( "Sandbox.InteropSystem, Sandbox.Engine" );
+			if ( interopType == null )
+			{
+				foreach ( var asm in AppDomain.CurrentDomain.GetAssemblies() )
+				{
+					interopType = asm.GetType( "Sandbox.InteropSystem" );
+					if ( interopType != null ) break;
+				}
+			}
+
+			if ( interopType != null )
+			{
+				var objectsField = interopType.GetField( "Objects", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static );
+				if ( objectsField?.GetValue( null ) is System.Collections.Concurrent.ConcurrentDictionary<uint, object> dict )
+				{
+					foreach ( var kvp in dict )
+					{
+						if ( kvp.Value == null )
+						{
+							dict[kvp.Key] = new Widget();
+						}
+					}
+				}
+			}
+		}
+		catch { }
 	}
 }

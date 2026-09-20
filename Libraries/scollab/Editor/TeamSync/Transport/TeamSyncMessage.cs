@@ -19,7 +19,8 @@ public enum TeamSyncMessageType
 	SceneSnapshot,     // Full scene snapshot for catch-up
 	SceneSaveNotice,   // Notification that scene was saved to disk by host
 	HostMigration,     // Notification that host migrated to a new peer
-	FileSync           // Live project file/asset synchronization
+	FileSync,          // Live project file/asset synchronization
+	ChatMessage        // In-editor text chat
 }
 
 /// <summary>
@@ -161,8 +162,6 @@ public sealed class SceneDeltaPayload
 	public bool? IsStatic { get; set; }
 	public List<string> Tags { get; set; }
 	public int? NetworkMode { get; set; }
-	public bool? Networked { get; set; }
-	public bool? NetworkInterpolation { get; set; }
 	public string PrefabSource { get; set; }
 	public string ComponentId { get; set; }
 	public string ComponentType { get; set; }
@@ -191,4 +190,11 @@ public sealed class HostMigrationPayload
 	public string PreviousHostId { get; set; }
 	public string NewHostId { get; set; }
 	public int Port { get; set; }
+}
+
+public sealed class ChatMessagePayload
+{
+	public string SenderName { get; set; }
+	public string SenderColor { get; set; }
+	public string Message { get; set; }
 }
