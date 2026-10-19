@@ -3,7 +3,7 @@ using Editor;
 namespace Editor.TeamSync;
 
 /// <summary>
-/// Top editor menu shortcuts for s&collab.
+/// Top editor menu shortcuts for s&amp;collab.
 /// </summary>
 public static class MyEditorMenu
 {

@@ -6,7 +6,7 @@ using Editor;
 namespace Editor.TeamSync;
 
 /// <summary>
-/// Utility for opening and raising dockable editor panels within s&box's native DockManager.
+/// Utility for opening and raising dockable editor panels within s&amp;box's native DockManager.
 /// </summary>
 public static class DockHelper
 {
